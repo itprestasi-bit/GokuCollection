@@ -1,0 +1,3 @@
+- [x] Implement fixes in `FirebaseDataConnectDataSource.kt`
+- [x] Implement fixes in `Repositories.kt`
+- [x] Verify build with `./gradlew :app:compileDebugKotlin`

@@ -1,0 +1,12 @@
+specVersion: "v1beta"
+serviceId: "gokuproject-8b270-service"
+location: "asia-southeast2"
+schema:
+  source: "schema"
+  datasource:
+    postgresql:
+      database: "fdc"
+      cloudSql:
+        instanceId: "gokuproject-8b270-instance"
+connectorDirs:
+  - "default"

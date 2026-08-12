@@ -1,0 +1,8 @@
+connectorId: "default"
+generate:
+  kotlinSdk:
+    outputDir: "../../kotlin/com/collectionfield/app/dataconnect"
+    package: "com.collectionfield.app.dataconnect"
+  javascriptSdk:
+    outputDir: "../../../../../dashboard/lib/dataconnect"
+    package: "@gokucollection/dataconnect"
