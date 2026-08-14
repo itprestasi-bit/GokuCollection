@@ -1,0 +1,13 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "live_locations": {
+      ".read": "auth != null && (auth.token.role === 'admin' || auth.token.role === 'supervisor' || auth.token.role === 'management')",
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    }
+  }
+}

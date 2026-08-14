@@ -1,0 +1,18 @@
+[
+  {
+    "employeeCode": "COL001",
+    "pin": "123456",
+    "displayName": "Budi Collector",
+    "role": "COLLECTOR",
+    "branchId": "JKT-01",
+    "active": true
+  },
+  {
+    "employeeCode": "ADM001",
+    "pin": "654321",
+    "displayName": "Admin Collection",
+    "role": "ADMIN",
+    "branchId": "HQ",
+    "active": true
+  }
+]

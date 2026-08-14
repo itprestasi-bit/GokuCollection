@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Collection Field</string>
+    <string name="tracking_channel_name">Shift tracking</string>
+    <string name="tracking_channel_description">Shows when work-shift location tracking is active.</string>
+</resources>

@@ -1,0 +1,122 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // NOTE: This file must stay byte-identical to /Users/langg__/collection_app/firestore.rules
+    // Both repos deploy to the same Firebase project (gokuproject-8b270).
+
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function role() {
+      return request.auth.token.role;
+    }
+
+    function isStaff() {
+      return isAuth() && (role() == 'admin' || role() == 'supervisor' || role() == 'management');
+    }
+
+    function isOwner(uid) {
+      return isAuth() && request.auth.uid == uid;
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isStaff();
+      allow create, delete: if isAuth() && role() == 'admin';
+      // Admin can change anything. The owner can update their own profile
+      // (Android writes device_id/name/branch_id on every login) but may
+      // never change role/active/employee_code on themselves — that would be
+      // self-elevation. Compare by value, not by which keys were touched, so
+      // it doesn't matter whether the client happens to re-send an unchanged
+      // privileged field alongside the legitimate ones.
+      allow update: if (isAuth() && role() == 'admin') || (
+        isOwner(uid) &&
+        request.resource.data.role == resource.data.role &&
+        request.resource.data.active == resource.data.active &&
+        request.resource.data.employee_code == resource.data.employee_code
+      );
+    }
+
+    match /outlets/{outletId} {
+      allow read: if isAuth();
+      allow create: if isAuth();
+      allow update, delete: if isStaff();
+    }
+
+    match /assignments/{assignmentId} {
+      // Split get/list: Firestore rejects a *list* query outright unless the rule
+      // is provable from the query's own filters. A single `get` (by doc id) is
+      // always evaluated against that document's real data, so the owner check
+      // works there; broad `list` queries (e.g. the admin dashboard's date-range
+      // report) can only rely on the auth-only isStaff() check, not resource.data.
+      // `resource == null` (no assignment created for that collector_uid+date
+      // yet, a normal day-to-day case) must be allowed too — referencing
+      // resource.data on a nonexistent document errors out as permission-denied
+      // otherwise, instead of the clean "not found" the Android app expects.
+      allow get: if isAuth() && (
+        resource == null || resource.data.collector_uid == request.auth.uid || isStaff()
+      );
+      allow list: if isStaff();
+      allow write: if isStaff();
+    }
+
+    match /shifts/{shiftId} {
+      allow create: if isAuth() && request.resource.data.collector_uid == request.auth.uid;
+      allow read: if isAuth() && (resource.data.collector_uid == request.auth.uid || isStaff());
+      allow update: if isAuth() && (
+        (resource.data.collector_uid == request.auth.uid && request.resource.data.collector_uid == request.auth.uid) ||
+        isStaff()
+      );
+      allow delete: if isAuth() && role() == 'admin';
+
+      match /telemetry/{pointId} {
+        allow create: if isAuth() && request.resource.data.collector_uid == request.auth.uid;
+        allow read: if isAuth() && (resource.data.collector_uid == request.auth.uid || isStaff());
+        allow update, delete: if false;
+      }
+    }
+
+    match /visits/{visitId} {
+      allow create: if isAuth() && request.resource.data.collector_uid == request.auth.uid;
+      allow read: if isAuth() && (resource.data.collector_uid == request.auth.uid || isStaff());
+      allow update: if isAuth() && (
+        (resource.data.collector_uid == request.auth.uid && request.resource.data.collector_uid == request.auth.uid) ||
+        isStaff()
+      );
+      allow delete: if false;
+    }
+
+    match /stops/{stopId} {
+      allow create: if isAuth() && request.resource.data.collector_uid == request.auth.uid;
+      allow read: if isAuth() && (resource.data.collector_uid == request.auth.uid || isStaff());
+      allow update, delete: if false;
+    }
+
+    match /alerts/{alertId} {
+      allow read: if isAuth() && (resource.data.collector_uid == request.auth.uid || isStaff());
+      // Alerts are written exclusively by Cloud Functions via the Admin SDK,
+      // which bypasses these rules — collectors can never create/suppress their own alerts.
+      allow create: if false;
+      allow update: if isStaff() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'resolution_note', 'updated_at']);
+      allow delete: if false;
+    }
+
+    match /parameters/{paramId} {
+      allow read: if isAuth();
+      allow write: if isStaff();
+    }
+
+    match /teams/{teamId} {
+      allow read: if isAuth();
+      allow write: if isStaff();
+    }
+
+    match /audit_logs/{logId} {
+      allow read: if isStaff();
+      allow create: if isStaff();
+      allow update, delete: if false;
+    }
+  }
+}

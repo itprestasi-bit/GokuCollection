@@ -1,0 +1,148 @@
+package com.collectionfield.app.ui.screens
+
+import android.annotation.SuppressLint
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.collectionfield.app.util.LocationPermissions
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.maps.model.BitmapDescriptorFactory
+import com.google.android.gms.maps.model.CameraPosition
+import com.google.android.gms.maps.model.LatLng
+import com.google.maps.android.compose.*
+
+@SuppressLint("MissingPermission")
+@Composable
+fun RouteMapScreen(
+    viewModel: DailyPlanViewModel
+) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val fusedLocationClient = remember { LocationServices.getFusedLocationProviderClient(context) }
+
+    var userLocation by remember { mutableStateOf<LatLng?>(null) }
+    var permissionDenied by remember { mutableStateOf(false) }
+
+    fun fetchLocation() {
+        fusedLocationClient.lastLocation.addOnSuccessListener { location ->
+            if (location != null) {
+                val latLng = LatLng(location.latitude, location.longitude)
+                userLocation = latLng
+                viewModel.optimizeRoute(location.latitude, location.longitude)
+            }
+        }
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        if (results.values.any { it }) {
+            permissionDenied = false
+            fetchLocation()
+        } else {
+            permissionDenied = true
+        }
+    }
+
+    // Reachable directly from the home screen's "Rute Hari Ini" button, which may
+    // be the collector's first time granting location — a shift start isn't a
+    // prerequisite, so this screen needs its own permission request rather than
+    // assuming HomeScreen's shift-start flow already asked.
+    LaunchedEffect(Unit) {
+        if (LocationPermissions.hasForegroundLocation(context)) {
+            fetchLocation()
+        } else {
+            permissionLauncher.launch(LocationPermissions.requestablePermissions())
+        }
+    }
+
+    Scaffold { padding ->
+        Box(modifier = Modifier.padding(padding).fillMaxSize()) {
+            val currentLoc = userLocation
+            if (permissionDenied) {
+                Column(
+                    modifier = Modifier.align(Alignment.Center).fillMaxWidth().padding(horizontal = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        "Izin lokasi diperlukan untuk menampilkan rute hari ini.",
+                        textAlign = TextAlign.Center,
+                    )
+                    Button(onClick = {
+                        context.startActivity(
+                            Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.fromParts("package", context.packageName, null),
+                            )
+                        )
+                    }) {
+                        Text("Buka Pengaturan")
+                    }
+                }
+            } else if (currentLoc == null) {
+                CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+                Text("Mencari lokasi...", modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 32.dp))
+            } else {
+                val cameraPositionState = rememberCameraPositionState {
+                    position = CameraPosition.fromLatLngZoom(currentLoc, 12f)
+                }
+
+                GoogleMap(
+                    modifier = Modifier.fillMaxSize(),
+                    cameraPositionState = cameraPositionState,
+                    properties = MapProperties(isMyLocationEnabled = true),
+                    uiSettings = MapUiSettings(zoomControlsEnabled = true)
+                ) {
+                    // Start Marker
+                    Marker(
+                        state = MarkerState(position = currentLoc),
+                        title = "Mulai (Posisi Saya)",
+                        icon = BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)
+                    )
+
+                    // Optimized Route Markers
+                    state.optimizedRoute.forEachIndexed { index, outlet ->
+                        val pos = LatLng(outlet.latitude, outlet.longitude)
+                        Marker(
+                            state = MarkerState(position = pos),
+                            title = "${index + 1}. ${outlet.namaOutlet}",
+                            snippet = outlet.alamat
+                        )
+                    }
+
+                    // Polyline connecting the route
+                    if (state.optimizedRoute.isNotEmpty()) {
+                        val points = mutableListOf(currentLoc)
+                        points.addAll(state.optimizedRoute.map { LatLng(it.latitude, it.longitude) })
+
+                        Polyline(
+                            points = points,
+                            color = androidx.compose.ui.graphics.Color(0xFF4F46E5),
+                            width = 10f
+                        )
+                    }
+                }
+            }
+        }
+    }
+}

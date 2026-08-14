@@ -1,0 +1,23 @@
+{
+  "name": "functions",
+  "description": "Server-side anti-fraud checks and role-claim sync for Collection Field",
+  "engines": {
+    "node": "20"
+  },
+  "main": "lib/index.js",
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "serve": "npm run build && firebase emulators:start --only functions,firestore,database",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0",
+    "firebase-functions": "^6.3.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

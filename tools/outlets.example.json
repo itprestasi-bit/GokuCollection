@@ -1,0 +1,24 @@
+[
+  {
+    "id": "OUT-001",
+    "code": "OUT001",
+    "name": "Toko Makmur",
+    "lat": -6.21462,
+    "lng": 106.84513,
+    "address": "Jakarta Pusat",
+    "radiusM": 75,
+    "priority": 3,
+    "status": "ACTIVE"
+  },
+  {
+    "id": "OUT-002",
+    "code": "OUT002",
+    "name": "Toko Sejahtera",
+    "lat": -6.20876,
+    "lng": 106.82011,
+    "address": "Tanah Abang, Jakarta",
+    "radiusM": 75,
+    "priority": 2,
+    "status": "ACTIVE"
+  }
+]

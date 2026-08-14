@@ -1,0 +1,15 @@
+{
+  "name": "collection-field-admin-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bootstrap-users": "node bootstrap-users.mjs",
+    "bootstrap-outlets": "node bootstrap-outlets.mjs"
+  },
+  "dependencies": {
+    "firebase-admin": "^14.2.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

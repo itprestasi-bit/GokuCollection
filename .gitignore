@@ -1,0 +1,21 @@
+# Build outputs
+build/
+app/build/
+.gradle/
+*.apk
+*.aab
+
+# Local machine config
+local.properties
+.idea/
+.DS_Store
+
+# Secrets — never commit
+*firebase-adminsdk*.json
+*service-account*.json
+tools/*.local.json
+app/google-services.json
+
+# Node
+node_modules/
+functions/lib/
