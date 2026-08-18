@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
@@ -43,7 +44,10 @@ class LoginViewModel(private val container: AppContainer) : ViewModel() {
         viewModelScope.launch {
             container.authRepository.login(employeeCode, pin)
                 .onSuccess { session ->
-                    container.outletRepository.refreshFromCloud()
+                    // Explicit user action and once per session — always pull a fresh
+                    // master list here, so "logout lalu login" is the reliable way for
+                    // a collector to force a sync when the office says data changed.
+                    container.outletRepository.refreshFromCloud(force = true)
                     container.enqueueSync()
                     _state.update { it.copy(isLoading = false, error = null) }
                     onSuccess(session)
@@ -99,6 +103,19 @@ class HomeViewModel(
         if (shift != null) container.visitRepository.observeAnyOpen(shift.id) else flowOf(null)
     }
 
+    /**
+     * The one outlet the open visit belongs to, resolved by id.
+     *
+     * This used to be `outletRepository.observeActive()` folded into the combine
+     * below purely so a `.find {}` could pick one row out of ~7.7k. That made every
+     * battery tick, every GPS fix and every sync-count change rebuild and re-diff
+     * the whole master list on the main-safe path — the single biggest source of
+     * jank and wasted CPU on this screen.
+     */
+    private val openVisitOutletFlow = openVisitFlow.flatMapLatest { visit ->
+        container.outletRepository.observeById(visit?.outletId)
+    }
+
     val state: StateFlow<HomeUiState> = combine(
         activeShiftFlow,
         container.telemetryRepository.observeLatest(session.employeeCode),
@@ -108,10 +125,8 @@ class HomeViewModel(
         DeviceState.batteryFlow(container.appContext),
         DeviceState.networkFlow(container.appContext),
         openVisitFlow,
-        container.outletRepository.observeActive(),
+        openVisitOutletFlow,
     ) { Array ->
-        val openVisit = Array[7] as VisitEntity?
-        val outlets = Array[8] as List<OutletEntity>
         HomeUiState(
             activeShift = Array[0] as ShiftEntity?,
             latestPoint = Array[1] as TelemetryPointEntity?,
@@ -120,8 +135,8 @@ class HomeViewModel(
             visitPlan = Array[4] as VisitPlan?,
             currentBatteryPct = Array[5] as Int,
             currentNetworkState = Array[6] as String,
-            openVisit = openVisit,
-            openVisitOutlet = outlets.find { it.id == openVisit?.outletId },
+            openVisit = Array[7] as VisitEntity?,
+            openVisitOutlet = Array[8] as OutletEntity?,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HomeUiState())
 
@@ -151,10 +166,25 @@ class HomeViewModel(
 
     fun logout() = container.authRepository.logout()
 
+    /** Called once the UI has shown [HomeUiState.cloudMessage], so it doesn't repeat. */
+    fun clearMessage() {
+        cloudMessage.value = null
+    }
+
     /** Fallback for when GPS accuracy is too poor for the automatic geofence to trigger. */
     fun manualCheckIn(outletId: String) {
         val shift = state.value.activeShift ?: return
         val lastPoint = state.value.latestPoint
+
+        // Same rule as the geofence: a visit can only be opened against a stop the
+        // office assigned for today. Without this the manual path would be a way
+        // around the restriction, which would make the geofence limit cosmetic.
+        val plannedIds = state.value.visitPlan?.outlets?.map { it.outletId }.orEmpty()
+        if (outletId !in plannedIds) {
+            cloudMessage.value = "Outlet ini tidak ada di jadwal kunjungan hari ini."
+            return
+        }
+
         viewModelScope.launch {
             if (container.visitRepository.getOpen(shift.id, outletId) != null) return@launch
             container.visitRepository.openVisit(
@@ -178,22 +208,46 @@ data class OutletListItem(
     val distanceM: Double? = null,
 )
 
+/**
+ * Today's assigned stops, nearest first — not the outlet master list.
+ *
+ * Two reasons it's scoped this way. It's the only set a collector can actually
+ * check in against, so a list of all ~7.7k outlets would mostly be rows they
+ * can't act on. And the previous version recomputed a haversine distance for
+ * every one of those rows and re-sorted the whole thing on *every* GPS fix,
+ * which is the kind of work that shows up as scroll jank and battery drain.
+ */
 class OutletViewModel(
-    container: AppContainer,
-    collectorId: String,
+    private val container: AppContainer,
+    private val collectorUid: String,
+    private val collectorId: String,
 ) : ViewModel() {
+    private val assignedOutletsFlow = flow {
+        val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+        val plan = container.firestoreService.fetchDailyPlan(collectorUid, today).getOrNull()
+        val ids = plan?.outlets?.map { it.outletId }.orEmpty()
+        emitAll(container.outletRepository.observeByIds(ids))
+    }
+
     val outlets: StateFlow<List<OutletListItem>> = combine(
-        container.outletRepository.observeActive(),
+        assignedOutletsFlow,
         container.telemetryRepository.observeLatest(collectorId),
     ) { outlets, point ->
-        outlets.map { outlet ->
-            OutletListItem(
-                outlet = outlet,
-                distanceM = point?.let {
-                    GeoMath.distanceMeters(it.lat, it.lng, outlet.lat, outlet.lng)
-                },
+        outlets
+            .map { outlet ->
+                OutletListItem(
+                    outlet = outlet,
+                    distanceM = point?.takeIf {
+                        GeoMath.isValidIndonesiaCoordinate(outlet.lat, outlet.lng)
+                    }?.let {
+                        GeoMath.distanceMeters(it.lat, it.lng, outlet.lat, outlet.lng)
+                    },
+                )
+            }
+            .sortedWith(
+                compareBy<OutletListItem> { it.distanceM ?: Double.MAX_VALUE }
+                    .thenByDescending { it.outlet.priority },
             )
-        }.sortedWith(compareBy<OutletListItem> { it.distanceM ?: Double.MAX_VALUE }.thenByDescending { it.outlet.priority })
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 }
 

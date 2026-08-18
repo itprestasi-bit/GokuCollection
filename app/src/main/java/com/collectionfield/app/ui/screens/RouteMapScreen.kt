@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -106,6 +107,9 @@ fun RouteMapScreen(
                 val cameraPositionState = rememberCameraPositionState {
                     position = CameraPosition.fromLatLngZoom(currentLoc, 12f)
                 }
+                // Read outside the map's content lambda: that scope uses the
+                // GoogleMapComposable applier and can't read MaterialTheme.
+                val routeColor = MaterialTheme.colorScheme.primary
 
                 GoogleMap(
                     modifier = Modifier.fillMaxSize(),
@@ -137,8 +141,8 @@ fun RouteMapScreen(
 
                         Polyline(
                             points = points,
-                            color = androidx.compose.ui.graphics.Color(0xFF4F46E5),
-                            width = 10f
+                            color = routeColor,
+                            width = 8f
                         )
                     }
                 }

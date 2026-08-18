@@ -1,13 +1,20 @@
-import { initializeApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { FieldValue } from "firebase-admin/firestore";
 import { onDocumentCreated, onDocumentUpdated, onDocumentWritten } from "firebase-functions/v2/firestore";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
-import { logger } from "firebase-functions/v2";
+import { logger, setGlobalOptions } from "firebase-functions/v2";
 import { createAlert, db, distanceMeters, getParams } from "./helpers";
 
-initializeApp();
+// The Admin app is initialised in ./helpers, which loads first (see note there).
+
+// Firestore for this project lives in asia-southeast2 (Jakarta). Eventarc will
+// only place a Firestore trigger in the database's own region, so every function
+// here has to run there too — and it is the right region regardless, since both
+// the collectors and the App Hosting backend are in Indonesia. Note that a
+// non-default region means the web client must ask for it explicitly:
+// getFunctions(app, "asia-southeast2"), otherwise callables 404 in us-central1.
+setGlobalOptions({ region: "asia-southeast2", maxInstances: 10 });
 
 const VALID_ROLES = ["collector", "supervisor", "admin", "management"] as const;
 
@@ -209,6 +216,35 @@ export const onVisitClosed = onDocumentUpdated("visits/{visitId}", async (event)
 });
 
 /**
+ * Is this point inside any outlet's geofence?
+ *
+ * Deliberately NOT a full-collection scan: `outlets` holds ~7.7k documents, and
+ * reading all of them per shift per 10-minute tick was by itself enough to blow
+ * through the whole daily Firestore read quota. Instead this narrows by latitude
+ * first — a single-field range query served by the automatic index, returning a
+ * handful of documents — then finishes the check in memory.
+ *
+ * The latitude band is intentionally wider than any plausible geofence so the
+ * cheap pre-filter can never exclude an outlet the exact haversine test would
+ * have matched.
+ */
+const LAT_BAND_DEG = 0.02; // ~2.2 km north/south
+
+async function isNearAnyOutlet(lat: number, lng: number, defaultRadiusM: number): Promise<boolean> {
+  const nearby = await db
+    .collection("outlets")
+    .where("lat", ">=", lat - LAT_BAND_DEG)
+    .where("lat", "<=", lat + LAT_BAND_DEG)
+    .get();
+
+  return nearby.docs.some((o) => {
+    const outlet = o.data();
+    if (typeof outlet.lat !== "number" || typeof outlet.lng !== "number") return false;
+    return distanceMeters(lat, lng, outlet.lat, outlet.lng) <= (outlet.radius_m ?? defaultRadiusM);
+  });
+}
+
+/**
  * Every 10 minutes during working hours (09:00-21:00 WIB), scans shifts still
  * marked active for signs of trouble a per-event trigger can't see on its own:
  * a GPS feed that's gone silent, or a stop lasting too long outside any outlet.
@@ -267,11 +303,11 @@ export const scanActiveShifts = onSchedule(
       );
       if (maxDrift > 60) continue; // moved around too much to call this a "stop"
 
-      const outlets = await db.collection("outlets").get();
-      const nearOutlet = outlets.docs.some((o) => {
-        const outlet = o.data();
-        return distanceMeters(latest.lat, latest.lng, outlet.lat, outlet.lng) <= (outlet.radius_m ?? params.default_outlet_radius_m);
-      });
+      const nearOutlet = await isNearAnyOutlet(
+        latest.lat,
+        latest.lng,
+        params.default_outlet_radius_m,
+      );
       if (nearOutlet) continue;
 
       await createAlert({

@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.collectionfield.app.data.repository.AppContainer
 import com.collectionfield.app.domain.VisitOutlet
 import com.collectionfield.app.domain.VisitPlan
+import com.collectionfield.app.util.GeoMath
 import com.collectionfield.app.util.RouteOptimizer
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -50,7 +51,15 @@ class DailyPlanViewModel(
     fun optimizeRoute(currentLat: Double, currentLng: Double) {
         viewModelScope.launch {
             val plan = _state.value.plan ?: loadTodayPlan()
-            val pendingOutlets = plan?.outlets?.filter { it.status == "PENDING" } ?: emptyList()
+            // Outlets with bad coordinates (0,0 sentinel or otherwise outside
+            // Indonesia — a known data-quality issue in the source import) are kept
+            // in the plan list so the collector can still see and manually check in
+            // to them, but excluded here so they can't drag the route toward the
+            // ocean or corrupt the nearest-neighbor ordering.
+            val pendingOutlets = plan?.outlets
+                ?.filter { it.status == "PENDING" }
+                ?.filter { GeoMath.isValidIndonesiaCoordinate(it.latitude, it.longitude) }
+                ?: emptyList()
             val optimized = RouteOptimizer.optimize(currentLat, currentLng, pendingOutlets)
             _state.update { it.copy(optimizedRoute = optimized) }
         }

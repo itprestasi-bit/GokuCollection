@@ -128,24 +128,67 @@ class FirebaseCloudDataSource {
         firestore.collection("users").document(uid).set(data, SetOptions.merge()).awaitResult()
     }
 
-    suspend fun fetchActiveOutlets(): List<OutletEntity> {
-        val snapshot = firestore.collection("outlets").whereEqualTo("status", "active").get().awaitResult()
+    /** One outlet as it arrived from Firestore, plus whether it is still active. */
+    data class RemoteOutlet(val entity: OutletEntity, val isActive: Boolean)
+
+    /**
+     * Outlet master data.
+     *
+     * [since] null pulls every active outlet — the first sync on a device, which
+     * has to be complete. Otherwise it pulls only what changed since that instant.
+     *
+     * The delta query deliberately does **not** filter on status. Filtering would
+     * make a deactivated outlet simply stop matching, so the phone would keep a
+     * stale copy and keep offering check-in at a location head office has closed.
+     * Fetching everything that changed and letting the caller drop the non-active
+     * ones is what makes deactivation actually propagate.
+     *
+     * Cost: at ~7.7k outlets a full pull is 7,683 document reads. With 20
+     * collectors each logging in daily that was 150k+ reads/day against a 50k
+     * daily allowance. A delta pull on a normal day is a handful.
+     */
+    suspend fun fetchActiveOutlets(since: Timestamp? = null): List<RemoteOutlet> {
+        val query = if (since == null) {
+            firestore.collection("outlets").whereEqualTo("status", "active")
+        } else {
+            firestore.collection("outlets").whereGreaterThan("updated_at", since)
+        }
+
+        val snapshot = query.get().awaitResult()
         return snapshot.documents.map { doc ->
             @Suppress("UNCHECKED_CAST")
             val piutangMap = doc.get("piutang") as? Map<String, Map<String, Any?>>
-            OutletEntity(
-                id = doc.id,
-                code = doc.getString("code").orEmpty(),
-                name = doc.getString("name").orEmpty(),
-                lat = doc.getDouble("lat") ?: 0.0,
-                lng = doc.getDouble("lng") ?: 0.0,
-                address = doc.getString("address").orEmpty(),
-                radiusM = (doc.getLong("radius_m") ?: 30L).toInt(),
-                priority = (doc.getLong("priority") ?: 1L).toInt(),
-                status = "ACTIVE",
-                piutangJson = piutangMapToJson(piutangMap),
+            val status = doc.getString("status").orEmpty()
+            RemoteOutlet(
+                entity = OutletEntity(
+                    id = doc.id,
+                    code = doc.getString("code").orEmpty(),
+                    name = doc.getString("name").orEmpty(),
+                    lat = doc.getDouble("lat") ?: 0.0,
+                    lng = doc.getDouble("lng") ?: 0.0,
+                    address = doc.getString("address").orEmpty(),
+                    radiusM = (doc.getLong("radius_m") ?: 30L).toInt(),
+                    priority = (doc.getLong("priority") ?: 1L).toInt(),
+                    status = "ACTIVE",
+                    piutangJson = piutangMapToJson(piutangMap),
+                ),
+                // `since == null` already filtered to active in the query itself.
+                isActive = since == null || status.equals("active", ignoreCase = true),
             )
         }
+    }
+
+    /**
+     * Server time, used as the delta cursor.
+     *
+     * Taken from the server rather than the phone's clock on purpose: a device
+     * whose clock runs fast would store a future cursor and then silently skip
+     * every edit made in between. Costs one document write + read.
+     */
+    suspend fun serverNow(): Timestamp {
+        val ref = firestore.collection("_sync").document("clock")
+        ref.set(mapOf("at" to FieldValue.serverTimestamp()), SetOptions.merge()).awaitResult()
+        return ref.get().awaitResult().getTimestamp("at") ?: Timestamp.now()
     }
 
     private fun piutangMapToJson(piutangMap: Map<String, Map<String, Any?>>?): String? {
@@ -171,6 +214,21 @@ class FirebaseCloudDataSource {
      * the node are preserved. Used for immediate shift start/end status changes,
      * where we want the collector to keep showing at their last known position.
      */
+    /**
+     * Heading-only patch.
+     *
+     * Exists because a parked collector barely sends position updates — the
+     * telemetry gate deliberately goes quiet — so a heading riding along with
+     * position would not reach the map for minutes. This is `updateChildren`, so
+     * it touches two keys instead of rewriting the node, and it is rate-limited
+     * by the caller to genuine turns rather than sensor noise.
+     */
+    suspend fun updateLiveLocationHeading(uid: String, heading: Float) {
+        realtime.reference.child("live_locations").child(uid)
+            .updateChildren(mapOf("heading" to heading, "updated_at" to ServerValue.TIMESTAMP))
+            .awaitResult()
+    }
+
     suspend fun updateLiveLocationStatus(uid: String, status: String) {
         realtime.reference.child("live_locations").child(uid)
             .updateChildren(mapOf("status" to status, "updated_at" to ServerValue.TIMESTAMP))

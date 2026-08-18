@@ -22,7 +22,9 @@ class FirestoreService(
         val stops = remote.fetchTodayStops(collectorUid, date)
         if (stops.isEmpty()) return@runCatching null
 
-        val localOutlets = outletRepository.observeActive().first().associateBy { it.id }
+        // Fetch only the stops' own outlets. This used to load the entire ~7.7k-row
+        // master list into a map to look up a dozen ids.
+        val localOutlets = outletRepository.getByIds(stops.map { it.outletId }).associateBy { it.id }
         val outlets = stops.mapIndexedNotNull { index, stop ->
             localOutlets[stop.outletId]?.let { outlet ->
                 VisitOutlet(

@@ -25,8 +25,13 @@ import com.collectionfield.app.data.local.TelemetryPointEntity
 import com.collectionfield.app.domain.SyncStatus
 import com.collectionfield.app.domain.TrackingMode
 import com.collectionfield.app.domain.TrackingPolicy
+import com.collectionfield.app.util.CompassProvider
 import com.collectionfield.app.util.DeviceState
+import com.collectionfield.app.util.HeadingFilter
+import com.collectionfield.app.util.LocationRefiner
 import com.collectionfield.app.util.MovementClassifier
+import com.collectionfield.app.util.StationaryDetector
+import com.collectionfield.app.util.TelemetryGate
 import com.collectionfield.app.sync.TelemetrySyncWorker
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
@@ -36,9 +41,14 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.UUID
 
 class LocationTrackingService : Service() {
@@ -46,17 +56,67 @@ class LocationTrackingService : Service() {
     private lateinit var fusedClient: FusedLocationProviderClient
     private lateinit var notificationManager: NotificationManager
     private val classifier = MovementClassifier()
+    private val refiner = LocationRefiner()
+    private val gate = TelemetryGate()
+    private val stationaryDetector = StationaryDetector()
+
+    /**
+     * Compass heading, kept separate from the GPS bearing.
+     *
+     * They answer different questions: GPS bearing is course over ground (only
+     * meaningful while moving), the compass is which way the handset is pointing
+     * (meaningful standing still). The dashboard prefers this and falls back to
+     * bearing, so the icon keeps a direction even when the collector is parked.
+     *
+     * Reaches the dashboard two ways: it rides along with every position update,
+     * and — for a collector who is parked and therefore barely sending positions
+     * — a real turn also pushes a heading-only patch. See [onHeading].
+     */
+    @Volatile
+    private var latestHeading: Float? = null
+    private var lastPushedHeading: Float? = null
+    private var lastHeadingPushAtMs = 0L
+    private val compass by lazy {
+        CompassProvider(applicationContext) { heading -> onHeading(heading) }
+    }
+
+    /**
+     * Compass callback. Always updates the local value; pushes to the live feed
+     * only on a genuine turn.
+     *
+     * The filter also emits periodically while the heading is steady, which is
+     * useful locally but must not become network traffic — otherwise a phone
+     * sitting on a table would write to the database every ten seconds forever.
+     * So the push is gated a second time here, on real rotation.
+     */
+    private fun onHeading(heading: Float) {
+        latestHeading = heading
+        val uid = currentCollectorUid ?: return
+
+        val now = System.currentTimeMillis()
+        val previous = lastPushedHeading
+        val turned = previous == null ||
+            kotlin.math.abs(HeadingFilter.shortestDelta(previous, heading)) >= HEADING_PUSH_DEGREES
+        if (!turned || now - lastHeadingPushAtMs < HEADING_PUSH_MIN_INTERVAL_MS) return
+
+        lastPushedHeading = heading
+        lastHeadingPushAtMs = now
+        serviceScope.launch {
+            runCatching { container.cloudDataSource?.updateLiveLocationHeading(uid, heading) }
+        }
+    }
 
     private var currentShiftId: String? = null
     private var currentCollectorId: String? = null
     private var currentCollectorUid: String? = null
     private var currentCollectorName: String? = null
     private var appliedMode: TrackingMode? = null
-    private var lastTelemetryRecordedAtMs = 0L
 
     private val container by lazy { (application as CollectionFieldApplication).container }
     private val statePrefs by lazy { getSharedPreferences("tracking_service", Context.MODE_PRIVATE) }
-    private val geofenceManager by lazy { GeofenceVisitManager(container.outletRepository, container.visitRepository) }
+    private val geofenceManager by lazy { GeofenceVisitManager(container.visitRepository) }
+    private var planWatcher: Job? = null
+    private var assignedOutletCount = 0
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
@@ -89,6 +149,7 @@ class LocationTrackingService : Service() {
 
     override fun onDestroy() {
         fusedClient.removeLocationUpdates(locationCallback)
+        compass.stop()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -123,6 +184,8 @@ class LocationTrackingService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0,
         )
         applyTrackingMode(TrackingMode.MOVING, force = true)
+        startPlanWatcher(collectorUid)
+        compass.start()
 
         // Immediate optimistic status so the collector shows as "moving" on the
         // admin map right away, instead of waiting for the first GPS fix (or
@@ -132,8 +195,43 @@ class LocationTrackingService : Service() {
         }
     }
 
+    /**
+     * Keeps the geofence set in sync with today's assignment.
+     *
+     * Re-read periodically rather than once, so a stop the office adds or removes
+     * mid-shift starts (or stops) counting for check-in without the collector
+     * having to restart anything. It's one document `get()` per pass — the
+     * assignment doc id is deterministic — so the cost is negligible.
+     */
+    private fun startPlanWatcher(collectorUid: String) {
+        planWatcher?.cancel()
+        planWatcher = serviceScope.launch {
+            while (true) {
+                val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
+                val outlets = runCatching {
+                    val stops = container.cloudDataSource?.fetchTodayStops(collectorUid, today).orEmpty()
+                    container.outletRepository.getByIds(stops.map { it.outletId })
+                }.getOrNull()
+
+                // On a failed fetch keep whatever set we already had rather than
+                // clearing it — losing the geofence mid-shift because of one flaky
+                // request would silently stop recording visits.
+                if (outlets != null) {
+                    geofenceManager.setAssignedOutlets(outlets)
+                    assignedOutletCount = outlets.size
+                }
+                delay(PLAN_REFRESH_INTERVAL_MS)
+            }
+        }
+    }
+
     private fun stopTracking() {
         fusedClient.removeLocationUpdates(locationCallback)
+        compass.stop()
+        stationaryDetector.reset()
+        lastPushedHeading = null
+        planWatcher?.cancel()
+        planWatcher = null
 
         // Partial update only (never setValue here) so the collector's last known
         // lat/lng stays on the node — they should still appear on the map, just
@@ -161,27 +259,50 @@ class LocationTrackingService : Service() {
         val mode = classifier.accept(if (location.hasSpeed()) location.speed else 0f)
         if (mode != appliedMode) applyTrackingMode(mode)
 
-        val accuracyM = if (location.hasAccuracy()) location.accuracy else -1f
-        val lowConfidence = accuracyM < 0f || accuracyM > 50f
+        // Accuracy gate, teleport rejection, stationary-jitter hold, Kalman position
+        // smoothing, and speed EMA all happen here — a null result means the raw fix
+        // was too poor or physically implausible to trust, so it's dropped entirely
+        // (nothing recorded, nothing pushed to the live map) rather than passed through.
+        // Stationary means "hasn't gone anywhere", not "reports a low speed".
+        // The speed field is derived from the same noisy positions it is meant to
+        // describe, so in a built-up street a parked phone can read several m/s
+        // and never reach STOPPED — leaving the jitter suppression switched off
+        // precisely when it is needed. Displacement is immune to that, so either
+        // signal is enough to call it parked.
+        val parked = stationaryDetector.accept(location.latitude, location.longitude, location.time)
+        val isStationary = mode == TrackingMode.STOPPED || parked
+
+        val refined = refiner.refine(location, isStationary = isStationary) ?: return
+        val lowConfidence = refined.accuracyM > 50f
 
         val point = TelemetryPointEntity(
             id = UUID.randomUUID().toString(),
             shiftId = shiftId,
             collectorId = collectorId,
             collectorUid = collectorUid,
-            lat = location.latitude,
-            lng = location.longitude,
-            accuracyM = accuracyM,
-            speedMps = if (location.hasSpeed()) location.speed else 0f,
-            bearing = if (location.hasBearing()) location.bearing else 0f,
-            capturedAt = location.time.takeIf { it > 0 } ?: System.currentTimeMillis(),
+            lat = refined.lat,
+            lng = refined.lng,
+            accuracyM = refined.accuracyM,
+            speedMps = refined.speedMps,
+            bearing = refined.bearing ?: 0f,
+            capturedAt = refined.capturedAtMs,
             batteryPct = DeviceState.batteryPercent(this),
             networkState = DeviceState.networkState(this),
             mockFlag = LocationCompat.isMock(location),
             syncStatus = SyncStatus.PENDING.name,
         )
 
+        // Movement threshold + heartbeat back-off. Standing still transmits nothing
+        // until a heartbeat falls due, which is what stops a collector parked at a
+        // customer from burning data and battery on identical points.
+        compass.updateLocation(point.lat, point.lng, timeMs = point.capturedAt)
+
+        val decision = gate.evaluate(point.lat, point.lng, point.capturedAt)
+
         serviceScope.launch {
+            // Geofence and the local shift record run on *every* accepted fix, not
+            // just transmitted ones: arrival detection must not wait on a heartbeat,
+            // and neither of these costs anything off-device.
             container.shiftRepository.updateLocation(shiftId, point.lat, point.lng)
 
             val atOutlet = geofenceManager.onLocation(
@@ -193,42 +314,51 @@ class LocationTrackingService : Service() {
                 lowConfidence = lowConfidence,
             )
 
-            // The GPS fix rate (as low as every 3s while moving) drives the live map
-            // below unconditionally — RTDB bills by bandwidth, not per-write, so that's
-            // cheap. The durable Firestore telemetry trail is billed per document
-            // written, so it stays throttled to its own cadence regardless of how often
-            // fixes arrive, to keep it from scaling 1:1 with the live-tracking interval.
-            val now = System.currentTimeMillis()
-            if (now - lastTelemetryRecordedAtMs >= TELEMETRY_MIN_INTERVAL_MS) {
-                lastTelemetryRecordedAtMs = now
+            if (decision.recordTrail) {
                 container.telemetryRepository.insert(point)
                 TelemetrySyncWorker.enqueue(applicationContext)
             }
 
-            // Immediate write for the dashboard live map — bypasses the batched WorkManager
-            // sync path so the marker stays as responsive as the GPS fix rate allows.
-            runCatching {
-                container.cloudDataSource?.writeLiveLocation(
-                    collectorUid,
-                    mapOf(
-                        "lat" to point.lat,
-                        "lng" to point.lng,
-                        "accuracy" to point.accuracyM,
-                        "speed" to point.speedMps * 3.6,
-                        "updated_at" to com.google.firebase.database.ServerValue.TIMESTAMP,
-                        "shift_id" to shiftId,
-                        "status" to if (atOutlet) "at_outlet" else mode.liveStatus(),
-                        "collector_name" to (currentCollectorName ?: collectorId),
-                        "team_id" to container.sessionRepository.currentSession()?.teamId,
-                    ),
-                )
+            if (decision.sendLive) {
+                // Immediate write for the dashboard live map — bypasses the batched
+                // WorkManager sync path so the marker stays responsive.
+                runCatching {
+                    container.cloudDataSource?.writeLiveLocation(
+                        collectorUid,
+                        mapOf(
+                            "lat" to point.lat,
+                            "lng" to point.lng,
+                            "accuracy" to point.accuracyM,
+                            "speed" to point.speedMps * 3.6,
+                            "bearing" to refined.bearing,
+                            "heading" to latestHeading,
+                            "updated_at" to com.google.firebase.database.ServerValue.TIMESTAMP,
+                            "shift_id" to shiftId,
+                            "status" to if (atOutlet) "at_outlet" else mode.liveStatus(),
+                            "collector_name" to (currentCollectorName ?: collectorId),
+                            "team_id" to container.sessionRepository.currentSession()?.teamId,
+                        ),
+                    )
+                }
             }
         }
 
-        val accuracy = if (point.accuracyM >= 0) "±${point.accuracyM.toInt()} m" else "akurasi n/a"
+        // Surfacing the geofence count matters: if today's assignment is empty the
+        // app will never auto check-in, and the collector should be able to see that
+        // from the notification rather than discovering it at an outlet.
+        //
+        // The transmit state is shown for the same reason — while parked, the app
+        // deliberately goes quiet, and without saying so a collector has no way to
+        // tell "saving data" apart from "tracking broken".
+        val plan = if (assignedOutletCount > 0) "$assignedOutletCount outlet" else "belum ada jadwal"
+        val transmit = when (decision.reason) {
+            TelemetryGate.Reason.MOVED -> "mengirim"
+            TelemetryGate.Reason.HEARTBEAT -> "hemat data"
+            TelemetryGate.Reason.SUPPRESSED -> "diam • hemat data"
+        }
         notificationManager.notify(
             NOTIFICATION_ID,
-            buildNotification("${mode.label()} • $accuracy • ${point.networkState.lowercase()}"),
+            buildNotification("${mode.label()} • $transmit • $plan"),
         )
     }
 
@@ -243,12 +373,22 @@ class LocationTrackingService : Service() {
             TrackingMode.STOPPED -> TrackingPolicy.Stopped
         }
 
-        val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, policy.intervalMs)
+        val request = LocationRequest.Builder(
+            // Drop off the GPS radio while parked — see TrackingPolicy.highAccuracy.
+            if (policy.highAccuracy) {
+                Priority.PRIORITY_HIGH_ACCURACY
+            } else {
+                Priority.PRIORITY_BALANCED_POWER_ACCURACY
+            },
+            policy.intervalMs,
+        )
             .setMinUpdateIntervalMillis(policy.minIntervalMs)
+            // The OS itself discards fixes under this displacement, so the app isn't
+            // even woken for them. Cheapest part of the movement threshold.
             .setMinUpdateDistanceMeters(policy.minDistanceM)
             // True = the very first fix waits for a high-quality reading instead of
             // returning whatever coarse (e.g. cell-tower) fix is available immediately.
-            .setWaitForAccurateLocation(true)
+            .setWaitForAccurateLocation(policy.highAccuracy)
             .build()
 
         fusedClient.removeLocationUpdates(locationCallback).addOnCompleteListener {
@@ -314,9 +454,15 @@ class LocationTrackingService : Service() {
         private const val CHANNEL_ID = "shift_tracking"
         private const val NOTIFICATION_ID = 1001
 
-        // Keeps the durable Firestore telemetry trail's write rate independent of the
-        // GPS fix interval — see the comment in handleLocation() for why.
-        private const val TELEMETRY_MIN_INTERVAL_MS = 15_000L
+
+        // How often to re-read today's assignment so mid-shift plan edits take effect.
+        private const val PLAN_REFRESH_INTERVAL_MS = 10 * 60 * 1000L
+
+        // A turn worth telling the dashboard about, and the floor between pushes.
+        // At 20 degrees / 3 s, continuously spinning costs at most 20 writes a
+        // minute; standing still costs none at all.
+        private const val HEADING_PUSH_DEGREES = 20f
+        private const val HEADING_PUSH_MIN_INTERVAL_MS = 3_000L
 
         fun start(context: Context, shiftId: String, collectorId: String, collectorUid: String) {
             val intent = Intent(context, LocationTrackingService::class.java).apply {

@@ -20,4 +20,12 @@ object GeoMath {
 
         return r * c
     }
+
+    /**
+     * Rejects (0,0) sentinel values and other out-of-range coordinates from bad
+     * imports — same bounding box used on the admin dashboard's live map, so an
+     * outlet either shows correctly in both places or is filtered from both.
+     */
+    fun isValidIndonesiaCoordinate(lat: Double, lng: Double): Boolean =
+        lat in -11.5..6.5 && lng in 94.5..141.5
 }

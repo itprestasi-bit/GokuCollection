@@ -2,7 +2,7 @@
   "name": "functions",
   "description": "Server-side anti-fraud checks and role-claim sync for Collection Field",
   "engines": {
-    "node": "20"
+    "node": "22"
   },
   "main": "lib/index.js",
   "private": true,

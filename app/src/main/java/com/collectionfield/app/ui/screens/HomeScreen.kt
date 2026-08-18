@@ -1,19 +1,15 @@
 /**
- * THESIS: The dashboard is a live, high-fidelity duty record that breathes with the collector's actions, 
- * moving from "Shift Ready" to "Active Duty" through fluid layout shifts.
- * 
- * OWN-WORLD: Soft Gray 50 background, Paper White containers with organic shadows (elevation 1-2), 
- * Slate 800 primary type, and Indigo 500 "Soft Stamp" actions.
- * 
- * STORY: The collector feels the weight and validity of their work as it is recorded in real-time 
- * on a clean, airy canvas.
- * 
- * FIRST VIEWPORT: A prominent "Duty Status" header followed by a summary of today's progress 
- * and the next immediate action, all unified on a single white surface.
- * 
- * FORM: Surface Concept #5 (Cohesive Duty Feed).
- * 
- * FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
+ * The collector's shift screen.
+ *
+ * Reading order follows what the collector needs, in the order they need it:
+ * shift state first (am I on the clock?), then the open visit if there is one
+ * (the only thing they can act on right now), then live telemetry as
+ * reassurance that tracking is working, then today's route.
+ *
+ * Visual system is the Prestasi Group mark's two colours — crimson #dc214c on a
+ * warm off-white — shared with the admin dashboard, so a supervisor moving
+ * between the web Command Center and a collector's phone sees one product.
+ * Colours come from the theme's roles, never literals; see ui/theme/Color.kt.
  */
 
 package com.collectionfield.app.ui.screens
@@ -25,12 +21,11 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -101,8 +96,19 @@ fun HomeScreen(
         }
     }
 
+    // cloudMessage carries both the outlet-sync result and the "this outlet isn't on
+    // today's schedule" rejection. It was previously computed and never rendered, so
+    // a rejected manual check-in just appeared to do nothing.
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(state.cloudMessage) {
+        val message = state.cloudMessage ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        viewModel.clearMessage()
+    }
+
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background
+        containerColor = MaterialTheme.colorScheme.background,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         Column(
             modifier = Modifier
@@ -237,22 +243,50 @@ fun HomeScreen(
                 
                 val outlets = state.visitPlan?.outlets ?: emptyList()
                 if (outlets.isEmpty()) {
+                    // Empty here has a specific consequence — no auto check-in today —
+                    // so it says that instead of just "no plan".
                     Surface(
-                        modifier = Modifier.fillMaxWidth().height(100.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = MaterialTheme.shapes.medium,
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Text("Belum ada rencana hari ini", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f))
+                        Column(
+                            Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                "Belum ada jadwal hari ini",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                "Check-in otomatis aktif hanya di outlet yang dijadwalkan admin.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
                     }
                 } else {
-                    LazyRow(
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        contentPadding = PaddingValues(bottom = 4.dp)
-                    ) {
-                        items(outlets) { outlet ->
-                            OutletPreviewCard(outlet, onClick = { selectedOutlet = outlet })
+                    // A vertical stack, not a horizontal carousel: a sideways swipe on
+                    // the main content fights the system back-gesture, and it hides how
+                    // many stops are left — the number a collector most wants to know.
+                    // The first three are shown here; "Lihat semua" opens the full route.
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        outlets.take(3).forEach { outlet ->
+                            StopSummaryRow(outlet, onClick = { selectedOutlet = outlet })
+                        }
+                        if (outlets.size > 3) {
+                            Text(
+                                "+${outlets.size - 3} outlet lainnya",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onOpenDailyPlan() }
+                                    .padding(vertical = 10.dp),
+                            )
                         }
                     }
                 }
@@ -264,8 +298,10 @@ fun HomeScreen(
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 DashboardActionItem(
+                    // No longer the whole outlet master list — this screen is scoped
+                    // to today's assignment, so the label says so.
                     title = "OUTLET",
-                    subtitle = "Data outlet",
+                    subtitle = "Tugas hari ini",
                     icon = Icons.Default.Storefront,
                     modifier = Modifier.weight(1f),
                     onClick = onOpenOutlets
@@ -431,32 +467,60 @@ private fun LiveTelemetryCard(state: HomeUiState) {
     }
 }
 
+/** One stop on today's route: sequence, name, address, status — full width so the
+ *  outlet name has room to be read rather than truncated to fit a 200dp card. */
 @Composable
-private fun OutletPreviewCard(outlet: VisitOutlet, onClick: () -> Unit) {
+private fun StopSummaryRow(outlet: VisitOutlet, onClick: () -> Unit) {
     Surface(
         modifier = Modifier
-            .width(200.dp)
-            .shadow(2.dp, RoundedCornerShape(16.dp))
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.medium)
             .clickable(onClick = onClick),
         color = MaterialTheme.colorScheme.surface,
-        shape = RoundedCornerShape(16.dp)
+        shape = MaterialTheme.shapes.medium,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Route order is the thing that tells a collector where they are in the
+            // day, so it leads the row instead of being buried in the body text.
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.size(26.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        outlet.urutanRute.toString(),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+
+            Spacer(Modifier.width(12.dp))
+
+            Column(Modifier.weight(1f)) {
+                Text(
+                    outlet.namaOutlet,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    outlet.alamat,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            Spacer(Modifier.width(8.dp))
             StatusBadge(outlet.status)
-            Text(
-                outlet.namaOutlet, 
-                style = MaterialTheme.typography.titleLarge, 
-                fontSize = 16.sp, 
-                maxLines = 1,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                outlet.alamat, 
-                style = MaterialTheme.typography.bodySmall, 
-                maxLines = 2,
-                minLines = 2,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-            )
         }
     }
 }
@@ -532,8 +596,8 @@ private fun ShiftCard(
                     onClick = onEnd,
                     modifier = Modifier.fillMaxWidth().height(48.dp),
                     colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.White.copy(alpha = 0.2f),
-                        contentColor = Color.White
+                        containerColor = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.18f),
+                        contentColor = MaterialTheme.colorScheme.onPrimary
                     ),
                     shape = RoundedCornerShape(12.dp)
                 ) {

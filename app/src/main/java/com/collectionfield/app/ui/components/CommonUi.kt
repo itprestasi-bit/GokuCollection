@@ -19,27 +19,36 @@ import java.text.NumberFormat
 import java.text.SimpleDateFormat
 import java.util.*
 
+/**
+ * Status chip. Colour comes from the theme's status roles rather than a literal
+ * hex, so it stays legible in both appearances — the old emerald #10B981 was
+ * picked against a light surface and dropped out of contrast on the dark one.
+ *
+ * The label is spelled out, not colour-only: "SELESAI" vs "BELUM" has to survive
+ * a greyscale screen in the sun.
+ */
 @Composable
 fun StatusBadge(status: String) {
-    val color = when (status) {
-        "SELESAI" -> Color(0xFF10B981) // Emerald 500
+    val fg = when (status) {
+        "SELESAI" -> MaterialTheme.colorScheme.tertiary
         "PENDING" -> MaterialTheme.colorScheme.primary
-        else -> MaterialTheme.colorScheme.secondary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val bg = when (status) {
+        "SELESAI" -> MaterialTheme.colorScheme.tertiaryContainer
+        "PENDING" -> MaterialTheme.colorScheme.primaryContainer
+        else -> MaterialTheme.colorScheme.surfaceVariant
     }
     val label = when (status) {
-        "PENDING" -> "BELUM DIKUNJUNGI"
+        "PENDING" -> "BELUM"
         else -> status
     }
-    Surface(
-        color = color.copy(alpha = 0.1f),
-        shape = RoundedCornerShape(8.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, color.copy(alpha = 0.5f))
-    ) {
+    Surface(color = bg, shape = MaterialTheme.shapes.extraSmall) {
         Text(
             text = label,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-            style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
-            color = color
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
+            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+            color = fg,
         )
     }
 }

@@ -59,8 +59,27 @@ interface OutletDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsertAll(outlets: List<OutletEntity>)
 
+    /**
+     * The full master list — ~7.7k rows. Only for screens that genuinely need
+     * every outlet. Do NOT put this in a `combine` that re-emits on every GPS
+     * fix: it rebuilds and re-diffs the whole list each time.
+     */
     @Query("SELECT * FROM outlets WHERE status = 'ACTIVE' ORDER BY priority DESC, name ASC")
     fun observeActive(): Flow<List<OutletEntity>>
+
+    /** The handful of outlets on today's route — the query the app should reach for. */
+    @Query("SELECT * FROM outlets WHERE id IN (:ids)")
+    fun observeByIds(ids: List<String>): Flow<List<OutletEntity>>
+
+    @Query("SELECT * FROM outlets WHERE id IN (:ids)")
+    suspend fun getByIds(ids: List<String>): List<OutletEntity>
+
+    @Query("SELECT * FROM outlets WHERE id = :id LIMIT 1")
+    fun observeById(id: String): Flow<OutletEntity?>
+
+    /** Removes outlets a delta sync reported as no longer active. */
+    @Query("DELETE FROM outlets WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<String>)
 
     @Query("SELECT COUNT(*) FROM outlets")
     suspend fun count(): Int

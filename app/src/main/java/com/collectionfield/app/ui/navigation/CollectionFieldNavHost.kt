@@ -101,7 +101,9 @@ fun CollectionFieldNavHost(container: AppContainer) {
         composable(Route.OUTLETS) {
             val session = container.authRepository.currentSession() ?: return@composable
             val vm: OutletViewModel = viewModel(
-                factory = simpleViewModelFactory { OutletViewModel(container, session.employeeCode) },
+                factory = simpleViewModelFactory {
+                    OutletViewModel(container, session.uid, session.employeeCode)
+                },
             )
             OutletListScreen(viewModel = vm, onBack = { navController.popBackStack() })
         }

@@ -1,4 +1,11 @@
+import { getApps, initializeApp } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
+
+// ES import hoisting runs this module's body *before* index.ts reaches its own
+// initializeApp() call, so getFirestore() here used to throw app/no-app at load
+// time — which failed the whole codebase analysis on deploy. Initialising from
+// whichever module loads first, guarded, is the only order-independent fix.
+if (!getApps().length) initializeApp();
 
 const db = getFirestore();
 

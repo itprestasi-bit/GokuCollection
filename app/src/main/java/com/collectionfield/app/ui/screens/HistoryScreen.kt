@@ -100,13 +100,13 @@ fun HistoryScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Surface(
-                                    color = if (isActive) Color(0xFF10B981).copy(alpha = 0.1f) else MaterialTheme.colorScheme.surfaceVariant,
+                                    color = if (isActive) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.surfaceVariant,
                                     shape = RoundedCornerShape(8.dp),
                                 ) {
                                     Text(
                                         text = if (isActive) "Sedang Berlangsung" else "Selesai",
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = if (isActive) Color(0xFF10B981) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                                        color = if (isActive) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
                                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
                                     )
                                 }

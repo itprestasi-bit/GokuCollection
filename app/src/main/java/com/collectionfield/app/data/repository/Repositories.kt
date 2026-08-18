@@ -19,7 +19,9 @@ import com.collectionfield.app.sync.TelemetrySyncWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import com.google.firebase.Timestamp
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import java.util.UUID
 
@@ -123,16 +125,88 @@ class TelemetryRepository(private val db: CollectionDatabase) {
 }
 
 class OutletRepository(
+    context: Context,
     private val db: CollectionDatabase,
     private val cloud: FirebaseCloudDataSource?,
 ) {
+    private val prefs = context.applicationContext
+        .getSharedPreferences("outlet_sync", Context.MODE_PRIVATE)
+
     fun observeActive(): Flow<List<OutletEntity>> = db.outletDao().observeActive()
 
-    suspend fun refreshFromCloud(): Result<Int> = runCatching {
+    /** Today's route only. Preferred over [observeActive] anywhere a screen or the
+     *  geofence needs "the outlets that matter now" rather than the whole master list. */
+    fun observeByIds(ids: List<String>): Flow<List<OutletEntity>> =
+        if (ids.isEmpty()) flowOf(emptyList()) else db.outletDao().observeByIds(ids)
+
+    suspend fun getByIds(ids: List<String>): List<OutletEntity> =
+        if (ids.isEmpty()) emptyList() else db.outletDao().getByIds(ids)
+
+    fun observeById(id: String?): Flow<OutletEntity?> =
+        if (id == null) flowOf(null) else db.outletDao().observeById(id)
+
+    /**
+     * Syncs outlet master data into Room, pulling only what changed.
+     *
+     * Three modes, in order of preference:
+     *  - **Delta** (normal): everything modified since the stored cursor. On a
+     *    typical day that's a handful of documents.
+     *  - **Full**: no cursor yet (first run on this device), or the periodic
+     *    [FULL_RESYNC_INTERVAL_MS] safety net is due. The safety net exists
+     *    because delta is only as trustworthy as the `updated_at` field — if any
+     *    write path ever forgets to set it, that outlet would drift out of sync
+     *    forever, and a monthly full pull bounds that damage.
+     *  - **Skipped**: an unforced call inside [REFRESH_INTERVAL_MS].
+     *
+     * [force] bypasses the time throttle only. It deliberately does *not* force a
+     * full pull — login used to do exactly that, and at 20 collectors those daily
+     * logins alone were ~150k document reads against a 50k daily allowance.
+     */
+    suspend fun refreshFromCloud(force: Boolean = false): Result<Int> = runCatching {
         val remote = cloud ?: error("Firebase belum dikonfigurasi")
-        val outlets = remote.fetchActiveOutlets()
-        db.outletDao().upsertAll(outlets)
-        outlets.size
+
+        val cachedCount = db.outletDao().count()
+        val now = System.currentTimeMillis()
+        val lastSyncAt = prefs.getLong(KEY_LAST_SYNC_AT, 0L)
+        if (!force && cachedCount > 0 && now - lastSyncAt < REFRESH_INTERVAL_MS) {
+            return@runCatching cachedCount
+        }
+
+        val cursorSeconds = prefs.getLong(KEY_CURSOR_SECONDS, 0L)
+        val lastFullAt = prefs.getLong(KEY_LAST_FULL_SYNC_AT, 0L)
+        val needsFull =
+            cachedCount == 0 || cursorSeconds == 0L || now - lastFullAt >= FULL_RESYNC_INTERVAL_MS
+
+        // Read the cursor *before* fetching, so anything edited while this sync is
+        // in flight is picked up next time instead of being skipped.
+        val nextCursor = remote.serverNow()
+        val since = if (needsFull) null else Timestamp(cursorSeconds, 0)
+
+        val changed = remote.fetchActiveOutlets(since)
+
+        val (active, inactive) = changed.partition { it.isActive }
+        db.outletDao().upsertAll(active.map { it.entity })
+        // A delta can carry outlets that were deactivated or archived; drop those
+        // locally, otherwise the phone keeps offering a closed location.
+        if (inactive.isNotEmpty()) {
+            db.outletDao().deleteByIds(inactive.map { it.entity.id })
+        }
+
+        prefs.edit()
+            .putLong(KEY_LAST_SYNC_AT, now)
+            .putLong(KEY_CURSOR_SECONDS, nextCursor.seconds)
+            .apply { if (needsFull) putLong(KEY_LAST_FULL_SYNC_AT, now) }
+            .apply()
+
+        if (needsFull) changed.size else db.outletDao().count()
+    }
+
+    private companion object {
+        const val KEY_LAST_SYNC_AT = "last_sync_at"
+        const val KEY_LAST_FULL_SYNC_AT = "last_full_sync_at"
+        const val KEY_CURSOR_SECONDS = "cursor_seconds"
+        const val REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000L // 6 hours
+        const val FULL_RESYNC_INTERVAL_MS = 30L * 24 * 60 * 60 * 1000L // 30 days
     }
 }
 
@@ -195,7 +269,7 @@ class AppContainer(context: Context) {
     val authRepository = FirebaseAuthRepository(appContext, sessionRepository, cloudDataSource)
     val shiftRepository = ShiftRepository(appContext, database)
     val telemetryRepository = TelemetryRepository(database)
-    val outletRepository = OutletRepository(database, cloudDataSource)
+    val outletRepository = OutletRepository(appContext, database, cloudDataSource)
     val visitRepository = VisitRepository(database)
     val firestoreService = FirestoreService(cloudDataSource, outletRepository)
 

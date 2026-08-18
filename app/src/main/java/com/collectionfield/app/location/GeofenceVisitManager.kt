@@ -1,10 +1,8 @@
 package com.collectionfield.app.location
 
 import com.collectionfield.app.data.local.OutletEntity
-import com.collectionfield.app.data.repository.OutletRepository
 import com.collectionfield.app.data.repository.VisitRepository
 import com.collectionfield.app.util.GeoMath
-import kotlinx.coroutines.flow.first
 import java.util.UUID
 
 /**
@@ -13,15 +11,35 @@ import java.util.UUID
  * moment a fix lands inside an outlet's radius_m, and closed once the collector has
  * been consistently outside radius_m + EXIT_BUFFER_M for EXIT_CONFIRM_FIXES fixes in a
  * row (hysteresis so GPS jitter right at the boundary doesn't flap the visit open/closed).
+ *
+ * Scope: **only the outlets assigned for today**, supplied via [setAssignedOutlets].
+ * That is a rule, not an optimisation — a collector checks in against the stops the
+ * office planned for them, so happening to drive past an unrelated outlet must not
+ * open a visit. It also happens to be what makes this cheap: the previous version
+ * measured the distance to every one of ~7.7k outlets on every fix (as often as
+ * every 3 seconds while moving), which is roughly 2,500 haversine computations a
+ * second on the phone's battery. A day's route is a dozen or so.
+ *
+ * With no assignment for today the manager simply never opens a visit; the
+ * collector can still record one through the manual check-in fallback.
  */
 class GeofenceVisitManager(
-    private val outletRepository: OutletRepository,
     private val visitRepository: VisitRepository,
 ) {
-    private var cachedOutlets: List<OutletEntity> = emptyList()
+    @Volatile
+    private var assignedOutlets: List<OutletEntity> = emptyList()
     private val exitStreak = mutableMapOf<String, Int>()
 
-    /** Returns true if the collector currently has at least one open (auto or manual) visit. */
+    /** Replaces the geofence set. Safe to call mid-shift when the plan changes. */
+    fun setAssignedOutlets(outlets: List<OutletEntity>) {
+        assignedOutlets = outlets
+        // Drop hysteresis state for outlets that are no longer on the route, so a
+        // stale streak can't close a visit belonging to a since-removed stop.
+        val ids = outlets.mapTo(HashSet()) { it.id }
+        exitStreak.keys.retainAll(ids)
+    }
+
+    /** True if any of today's stops currently has an open (auto or manual) visit. */
     suspend fun onLocation(
         shiftId: String,
         collectorId: String,
@@ -31,10 +49,14 @@ class GeofenceVisitManager(
         lowConfidence: Boolean,
     ): Boolean {
         if (lowConfidence) return visitRepository.getAnyOpen(shiftId) != null
-        if (cachedOutlets.isEmpty()) cachedOutlets = outletRepository.observeActive().first()
+
+        val outlets = assignedOutlets
+        if (outlets.isEmpty()) return visitRepository.getAnyOpen(shiftId) != null
 
         var anyOpen = false
-        for (outlet in cachedOutlets) {
+        for (outlet in outlets) {
+            if (!GeoMath.isValidIndonesiaCoordinate(outlet.lat, outlet.lng)) continue
+
             val distance = GeoMath.distanceMeters(lat, lng, outlet.lat, outlet.lng)
             val open = visitRepository.getOpen(shiftId, outlet.id)
 
