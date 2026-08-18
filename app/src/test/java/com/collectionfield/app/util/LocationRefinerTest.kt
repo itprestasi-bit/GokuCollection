@@ -134,13 +134,52 @@ class LocationRefinerTest {
     }
 
     @Test
-    fun `low accuracy fixes are dropped`() {
+    fun `a coarse fix that contradicts nothing holds the position instead of moving it`() {
+        // The +-100 m bug. A cell-tower fix 40 m away with 100 m of error is exactly
+        // what a phone that has not moved reports; taking it would swap a 12 m
+        // position for a 100 m one and shift the marker for no reason.
         val refiner = LocationRefiner()
-        val t = 1_000_000L
-        assertNotNull(feed(refiner, baseLat, baseLng, t, accuracyM = 12f))
+        var t = 1_000_000L
+        val good = feed(refiner, baseLat, baseLng, t, accuracyM = 12f)!!
+
+        repeat(10) {
+            t += 30_000
+            val r = feed(
+                refiner,
+                baseLat + metresToLat(40.0),
+                baseLng,
+                t,
+                accuracyM = 100f,
+                isStationary = false,
+            )
+            assertNotNull("harus tetap mengirim detak, bukan hilang dari peta", r)
+            val moved = GeoMath.distanceMeters(good.lat, good.lng, r!!.lat, r.lng)
+            assertEquals("posisi bergeser $moved m karena fix kasar", 0.0, moved, 0.001)
+            assertEquals("akurasi dilaporkan dari fix yang jadi sumber koordinat", 12f, r.accuracyM, 0.001f)
+        }
+    }
+
+    @Test
+    fun `a coarse fix far from the last position is dropped, then taken once nothing better arrives`() {
+        val refiner = LocationRefiner()
+        var t = 1_000_000L
+        feed(refiner, baseLat, baseLng, t, accuracyM = 12f)
+
+        // 800 m away, well beyond the fix's own 100 m error — a real contradiction,
+        // but not yet worth acting on while good fixes might still turn up.
+        val far = baseLat + metresToLat(800.0)
+        t += 30_000
         assertNull(
-            "fix akurasi 80 m seharusnya dibuang",
-            feed(refiner, baseLat, baseLng, t + 5_000, accuracyM = 80f),
+            "fix kasar yang bertentangan tidak boleh langsung dipakai",
+            feed(refiner, far, baseLng, t, accuracyM = 100f, isStationary = false),
+        )
+
+        // Past the silence window with nothing better: a rough position now beats a
+        // confidently stale one, otherwise the marker would sit there forever.
+        t += 130_000
+        assertNotNull(
+            "setelah lama tanpa fix bagus, posisi kasar harus dipakai",
+            feed(refiner, far, baseLng, t, accuracyM = 100f, isStationary = false),
         )
     }
 

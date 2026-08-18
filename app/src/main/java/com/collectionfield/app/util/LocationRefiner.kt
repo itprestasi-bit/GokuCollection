@@ -22,6 +22,7 @@ class LocationRefiner {
     private var lastAcceptedLng: Double? = null
     private var lastAcceptedAtMs = 0L
     private var lastAnyAcceptAtMs = 0L
+    private var lastAcceptedAccuracyM = 0f
     private var consecutiveRejects = 0
     private var smoothedSpeedMps = 0f
 
@@ -54,11 +55,45 @@ class LocationRefiner {
     ): RefinedLocation? {
         val now = timeMs
 
-        // 1. Accuracy gate — drop fixes too imprecise to trust, unless we haven't
-        // accepted anything in a while (better a rough fix than the map going dark).
+        // 1. Accuracy gate.
+        //
+        // A coarse fix is rarely *wrong*; it is uninformative. If it lands within
+        // its own error radius of where we already are, it is precisely what a
+        // phone that has not moved would report — so publishing it would trade a
+        // 12 m position for a 100 m one and shove the marker sideways on no
+        // evidence. Hold the last good position instead and let the clock move on:
+        // the dashboard still gets its heartbeat, without the marker inventing a
+        // journey. (This is where the reported +-100 m came from. The old rule let
+        // any fix through once nothing had been accepted for MAX_SILENCE_MS,
+        // which while parked meant one cell-tower estimate every two minutes.)
+        //
+        // Only a coarse fix that *contradicts* the last known position by more
+        // than its own error is worth taking, and then only when nothing better
+        // has arrived for MAX_SILENCE_MS: at that point it is the sole evidence
+        // the collector has gone somewhere, and rough beats confidently stale.
         val starved = lastAnyAcceptAtMs == 0L || now - lastAnyAcceptAtMs > MAX_SILENCE_MS
-        if (accuracyM > MAX_ACCEPTABLE_ACCURACY_M && !starved) {
-            return null
+        if (accuracyM > MAX_ACCEPTABLE_ACCURACY_M) {
+            val heldLat = lastAcceptedLat
+            val heldLng = lastAcceptedLng
+            if (heldLat != null && heldLng != null &&
+                GeoMath.distanceMeters(heldLat, heldLng, rawLat, rawLng) <= accuracyM
+            ) {
+                // Not a rejection: the position stands, only the timestamp advances.
+                // Accuracy is reported as that of the fix these coordinates actually
+                // came from, since that is the measurement being repeated here.
+                lastAcceptedAtMs = now
+                lastAnyAcceptAtMs = now
+                smoothedSpeedMps = 0f
+                return RefinedLocation(
+                    lat = heldLat,
+                    lng = heldLng,
+                    accuracyM = lastAcceptedAccuracyM,
+                    speedMps = 0f,
+                    bearing = bearing,
+                    capturedAtMs = now,
+                )
+            }
+            if (!starved) return null
         }
 
         // 2. Teleport rejection — reject a jump that implies an impossible speed,
@@ -118,6 +153,7 @@ class LocationRefiner {
         lastAcceptedLng = smoothLng
         lastAcceptedAtMs = now
         lastAnyAcceptAtMs = now
+        lastAcceptedAccuracyM = accuracyM
 
         return RefinedLocation(
             lat = smoothLat,

@@ -374,21 +374,20 @@ class LocationTrackingService : Service() {
         }
 
         val request = LocationRequest.Builder(
-            // Drop off the GPS radio while parked — see TrackingPolicy.highAccuracy.
-            if (policy.highAccuracy) {
-                Priority.PRIORITY_HIGH_ACCURACY
-            } else {
-                Priority.PRIORITY_BALANCED_POWER_ACCURACY
-            },
+            // Satellite accuracy in every mode, including parked — see the note on
+            // TrackingPolicy for why the parked mode is the last place to economise.
+            Priority.PRIORITY_HIGH_ACCURACY,
             policy.intervalMs,
         )
             .setMinUpdateIntervalMillis(policy.minIntervalMs)
             // The OS itself discards fixes under this displacement, so the app isn't
             // even woken for them. Cheapest part of the movement threshold.
             .setMinUpdateDistanceMeters(policy.minDistanceM)
-            // True = the very first fix waits for a high-quality reading instead of
-            // returning whatever coarse (e.g. cell-tower) fix is available immediately.
-            .setWaitForAccurateLocation(policy.highAccuracy)
+            // The very first fix waits for a high-quality reading instead of returning
+            // whatever coarse (e.g. cell-tower) fix is available immediately. Without
+            // this, a shift opens on a cell-tower estimate and the refiner has nothing
+            // better to compare against.
+            .setWaitForAccurateLocation(true)
             .build()
 
         fusedClient.removeLocationUpdates(locationCallback).addOnCompleteListener {
