@@ -136,18 +136,37 @@ class LocationRefiner {
             }
         }
 
-        // 4. Position smoothing — 1D Kalman filter, still fed the (possibly held)
-        // effective point so its variance keeps tightening on a stationary cluster.
-        val (smoothLat, smoothLng) = kalmanUpdate(effectiveLat, effectiveLng, accuracyM.coerceAtLeast(1f), now)
-
-        // 5. Speed refinement — EMA over raw GPS speed; zeroed while holding position
-        // so a stationary collector doesn't show phantom drift speed.
+        // 4. Speed refinement — EMA over raw GPS speed; zeroed while holding position
+        // so a stationary collector doesn't show phantom drift speed. Computed
+        // before the smoothing step because the filter below is tuned by it.
         smoothedSpeedMps = if (lastAcceptedAtMs == 0L) {
             rawSpeedMps
         } else {
             SPEED_EMA_ALPHA * rawSpeedMps + (1 - SPEED_EMA_ALPHA) * smoothedSpeedMps
         }
         if (held) smoothedSpeedMps = 0f
+
+        // 5. Position smoothing — 1D Kalman filter, still fed the (possibly held)
+        // effective point so its variance keeps tightening on a stationary cluster.
+        val (smoothLat, smoothLng) = kalmanUpdate(
+            effectiveLat,
+            effectiveLng,
+            accuracyM.coerceAtLeast(1f),
+            now,
+            processNoiseMps = if (held) MIN_PROCESS_NOISE_MPS else {
+                // Process noise answers "how far could they have gone since the last
+                // fix without us knowing". Pinning it at a walking pace while the
+                // collector rides at 15 m/s tells the filter each new fix must be
+                // mostly error, so it creeps toward it — measured, that parked the
+                // marker 102 m behind the rider. Scaling with observed speed is the
+                // honest answer, and the max() with the raw reading keeps it from
+                // lagging through an acceleration.
+                maxOf(
+                    MIN_PROCESS_NOISE_MPS,
+                    maxOf(smoothedSpeedMps, rawSpeedMps).toDouble() * PROCESS_NOISE_SPEED_SCALE,
+                )
+            },
+        )
 
         lastAcceptedLat = smoothLat
         lastAcceptedLng = smoothLng
@@ -165,7 +184,13 @@ class LocationRefiner {
         )
     }
 
-    private fun kalmanUpdate(lat: Double, lng: Double, accuracyM: Float, nowMs: Long): Pair<Double, Double> {
+    private fun kalmanUpdate(
+        lat: Double,
+        lng: Double,
+        accuracyM: Float,
+        nowMs: Long,
+        processNoiseMps: Double,
+    ): Pair<Double, Double> {
         val prevLat = kalmanLat
         val prevLng = kalmanLng
         if (prevLat == null || prevLng == null || kalmanVarianceM2 < 0) {
@@ -177,10 +202,9 @@ class LocationRefiner {
         }
 
         val elapsedMs = (nowMs - lastKalmanAtMs).coerceAtLeast(0L)
-        // Process noise: uncertainty grows between fixes as if the collector could be
-        // moving at a modest walking/riding pace — keeps the filter responsive instead
-        // of over-trusting old fixes into an ever-shrinking "frozen" variance.
-        kalmanVarianceM2 += elapsedMs * (PROCESS_NOISE_MPS * PROCESS_NOISE_MPS) / 1000.0
+        // Uncertainty grows between fixes at the rate the collector is actually
+        // travelling — see the call site. Squared because variance is in m².
+        kalmanVarianceM2 += elapsedMs * (processNoiseMps * processNoiseMps) / 1000.0
 
         val measurementVarianceM2 = (accuracyM * accuracyM).toDouble()
         val gain = kalmanVarianceM2 / (kalmanVarianceM2 + measurementVarianceM2)
@@ -202,7 +226,14 @@ class LocationRefiner {
         private const val MIN_JITTER_RADIUS_M = 8f
         /** 68% -> ~95% confidence. See the jitter-radius comment above. */
         private const val ACCURACY_CONFIDENCE_SCALE = 1.6f
-        private const val PROCESS_NOISE_MPS = 3.0
+        /**
+         * Floor for a standing or slow phone. Measured: dropping this to 2.0 cost
+         * a walker 3 m of extra lag for no visible gain in steadiness, since the
+         * jitter hold — not the filter — is what keeps a parked marker still.
+         */
+        private const val MIN_PROCESS_NOISE_MPS = 3.0
+        /** Headroom above the measured speed for turns and acceleration between fixes. */
+        private const val PROCESS_NOISE_SPEED_SCALE = 1.5
         private const val SPEED_EMA_ALPHA = 0.35f
     }
 }
