@@ -139,8 +139,26 @@ interface VisitDao {
     @Query("SELECT * FROM visits WHERE shiftId = :shiftId AND departureAt IS NULL LIMIT 1")
     suspend fun getAnyOpen(shiftId: String): VisitEntity?
 
-    @Query("SELECT * FROM visits WHERE shiftId = :shiftId AND departureAt IS NULL LIMIT 1")
+    /**
+     * The visit the collector still has something to do about — what drives the
+     * "Selesai Kunjungan" card.
+     *
+     * `result IS NULL` is the part that matters. A geofence visit is closed by
+     * walking out of the radius, so a collector who filed their result while still
+     * standing at the outlet kept an open visit and kept being offered the button
+     * for a visit they had already finished. Lifecycle code keeps using getAnyOpen,
+     * which deliberately still counts them: the visit is not over until they leave,
+     * it just has nothing left to ask of them.
+     */
+    @Query("SELECT * FROM visits WHERE shiftId = :shiftId AND departureAt IS NULL AND result IS NULL LIMIT 1")
     fun observeAnyOpen(shiftId: String): Flow<VisitEntity?>
+
+    /** Outlets already reported on during this shift, for marking the route done. */
+    @Query("SELECT DISTINCT outletId FROM visits WHERE shiftId = :shiftId AND result IS NOT NULL")
+    fun observeVisitedOutletIds(shiftId: String): Flow<List<String>>
+
+    @Query("SELECT DISTINCT outletId FROM visits WHERE collectorUid = :collectorUid AND result IS NOT NULL AND arrivalAt >= :sinceMs")
+    suspend fun visitedOutletIdsSince(collectorUid: String, sinceMs: Long): List<String>
 
     @Query("SELECT * FROM visits WHERE id = :id LIMIT 1")
     suspend fun getById(id: String): VisitEntity?

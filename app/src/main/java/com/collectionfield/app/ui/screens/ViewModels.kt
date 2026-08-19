@@ -93,12 +93,34 @@ class HomeViewModel(
     private val session: CollectorSession,
 ) : ViewModel() {
     private val cloudMessage = MutableStateFlow<String?>(null)
-    private val visitPlanFlow = flow {
+    private val fetchedPlanFlow = flow {
         val today = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date())
         val plan = container.firestoreService.fetchDailyPlan(session.uid, today).getOrNull()
         emit(plan)
     }
     private val activeShiftFlow = container.shiftRepository.observeActive(session.employeeCode)
+
+    /**
+     * Outlets already reported on, straight from Room.
+     *
+     * The plan itself is fetched once per screen, which is right — the assignment
+     * barely changes during a shift. What does change is which stops are done, and
+     * folding that in from the database rather than refetching means the row flips
+     * to SELESAI the instant the result is saved, offline included.
+     */
+    private val visitedOutletIdsFlow = activeShiftFlow.flatMapLatest { shift ->
+        if (shift != null) container.visitRepository.observeVisitedOutletIds(shift.id) else flowOf(emptyList())
+    }
+
+    private val visitPlanFlow = combine(fetchedPlanFlow, visitedOutletIdsFlow) { plan, done ->
+        if (plan == null || done.isEmpty()) return@combine plan
+        val finished = done.toSet()
+        plan.copy(
+            outlets = plan.outlets.map {
+                if (it.outletId in finished) it.copy(status = "SELESAI") else it
+            },
+        )
+    }
     private val openVisitFlow = activeShiftFlow.flatMapLatest { shift ->
         if (shift != null) container.visitRepository.observeAnyOpen(shift.id) else flowOf(null)
     }

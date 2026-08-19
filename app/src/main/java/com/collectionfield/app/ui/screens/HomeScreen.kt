@@ -362,7 +362,9 @@ fun HomeScreen(
         OutletDetailDialog(
             outlet,
             onDismiss = { selectedOutlet = null },
-            onManualCheckIn = if (state.activeShift != null) {
+            // Nothing to check into once the visit has been reported: offering it
+            // again is how an outlet ends up with two visits for one call.
+            onManualCheckIn = if (state.activeShift != null && outlet.status != "SELESAI") {
                 { viewModel.manualCheckIn(outlet.outletId) }
             } else null,
         )

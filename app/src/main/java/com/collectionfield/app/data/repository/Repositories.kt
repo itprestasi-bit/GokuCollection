@@ -248,6 +248,9 @@ class VisitRepository(private val db: CollectionDatabase) {
     suspend fun getOpen(shiftId: String, outletId: String): VisitEntity? = db.visitDao().getOpen(shiftId, outletId)
     suspend fun getAnyOpen(shiftId: String): VisitEntity? = db.visitDao().getAnyOpen(shiftId)
     fun observeAnyOpen(shiftId: String): Flow<VisitEntity?> = db.visitDao().observeAnyOpen(shiftId)
+    fun observeVisitedOutletIds(shiftId: String): Flow<List<String>> = db.visitDao().observeVisitedOutletIds(shiftId)
+    suspend fun visitedOutletIdsSince(collectorUid: String, sinceMs: Long): List<String> =
+        db.visitDao().visitedOutletIdsSince(collectorUid, sinceMs)
     suspend fun getById(id: String): VisitEntity? = db.visitDao().getById(id)
 
     suspend fun openVisit(
@@ -299,7 +302,7 @@ class AppContainer(context: Context) {
     val telemetryRepository = TelemetryRepository(database)
     val outletRepository = OutletRepository(appContext, database, cloudDataSource)
     val visitRepository = VisitRepository(database)
-    val firestoreService = FirestoreService(cloudDataSource, outletRepository)
+    val firestoreService = FirestoreService(cloudDataSource, outletRepository, visitRepository)
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
