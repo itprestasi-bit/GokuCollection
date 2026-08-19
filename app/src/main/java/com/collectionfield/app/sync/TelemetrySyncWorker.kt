@@ -31,9 +31,20 @@ class TelemetrySyncWorker(
         val cloud = container.cloudDataSource ?: return Result.success()
         val session = container.authRepository.currentSession() ?: return Result.success()
 
-        val shifts = container.shiftRepository.pending().filter {
-            it.collectorUid.isBlank() || it.collectorUid == session.uid
+        // Anything still marked SYNCING belongs to a run that was killed before it
+        // could finish — only one sync worker exists at a time, so nothing else can
+        // legitimately own those rows. Left alone they are invisible to pending()
+        // and permanently counted as unsynced, which is how a phone ends up
+        // reporting "tertunda" forever with no way to clear it. Re-uploading is
+        // harmless: every write is a set() on a deterministic document id.
+        val reclaimed = container.telemetryRepository.reclaimStuck() +
+            container.shiftRepository.reclaimStuck() +
+            container.visitRepository.reclaimStuck()
+        if (reclaimed > 0) {
+            android.util.Log.i("TelemetrySync", "$reclaimed baris tersangkut dikembalikan ke antrean")
         }
+
+        val shifts = container.shiftRepository.pending(session.uid)
         if (shifts.isNotEmpty()) {
             container.shiftRepository.updateSync(shifts.map { it.id }, SyncStatus.SYNCING)
             try {
@@ -48,9 +59,7 @@ class TelemetrySyncWorker(
         }
 
         while (true) {
-            val points = container.telemetryRepository.pending(250).filter {
-                it.collectorUid.isBlank() || it.collectorUid == session.uid
-            }
+            val points = container.telemetryRepository.pending(session.uid, 250)
             if (points.isEmpty()) break
 
             val ids = points.map { it.id }
@@ -70,9 +79,7 @@ class TelemetrySyncWorker(
             }
         }
 
-        val visits = container.visitRepository.pending().filter {
-            it.collectorUid.isBlank() || it.collectorUid == session.uid
-        }
+        val visits = container.visitRepository.pending(session.uid)
         if (visits.isNotEmpty()) {
             val ids = visits.map { it.id }
             container.visitRepository.updateSync(ids, SyncStatus.SYNCING)

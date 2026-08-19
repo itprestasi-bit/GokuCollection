@@ -107,7 +107,8 @@ class ShiftRepository(
         db.shiftDao().updateLocation(shiftId, lat, lng)
     }
 
-    suspend fun pending(limit: Int = 100): List<ShiftEntity> = db.shiftDao().pending(limit)
+    suspend fun pending(uid: String, limit: Int = 100): List<ShiftEntity> = db.shiftDao().pending(uid, limit)
+    suspend fun reclaimStuck(): Int = db.shiftDao().reclaimStuck()
 
     suspend fun updateSync(ids: List<String>, status: SyncStatus) {
         if (ids.isNotEmpty()) db.shiftDao().updateSyncStatus(ids, status.name)
@@ -118,7 +119,8 @@ class TelemetryRepository(private val db: CollectionDatabase) {
     fun observePendingCount(collectorId: String): Flow<Int> = db.telemetryDao().observePendingCount(collectorId)
     fun observeLatest(collectorId: String): Flow<TelemetryPointEntity?> = db.telemetryDao().observeLatest(collectorId)
     suspend fun insert(point: TelemetryPointEntity) = db.telemetryDao().insert(point)
-    suspend fun pending(limit: Int = 250) = db.telemetryDao().pending(limit)
+    suspend fun pending(uid: String, limit: Int = 250) = db.telemetryDao().pending(uid, limit)
+    suspend fun reclaimStuck(): Int = db.telemetryDao().reclaimStuck()
     suspend fun updateSync(ids: List<String>, status: SyncStatus, receivedAt: Long? = null) {
         if (ids.isNotEmpty()) db.telemetryDao().updateSyncStatus(ids, status.name, receivedAt)
     }
@@ -212,7 +214,8 @@ class OutletRepository(
 
 class VisitRepository(private val db: CollectionDatabase) {
     fun observeRecent(collectorId: String): Flow<List<VisitEntity>> = db.visitDao().observeRecent(collectorId)
-    suspend fun pending(limit: Int = 100): List<VisitEntity> = db.visitDao().pending(limit)
+    suspend fun pending(uid: String, limit: Int = 100): List<VisitEntity> = db.visitDao().pending(uid, limit)
+    suspend fun reclaimStuck(): Int = db.visitDao().reclaimStuck()
     suspend fun updateSync(ids: List<String>, status: SyncStatus) {
         if (ids.isNotEmpty()) db.visitDao().updateSyncStatus(ids, status.name)
     }

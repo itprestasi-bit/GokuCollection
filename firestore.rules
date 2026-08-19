@@ -73,7 +73,20 @@ service cloud.firestore {
       match /telemetry/{pointId} {
         allow create: if isAuth() && request.resource.data.collector_uid == request.auth.uid;
         allow read: if isAuth() && (resource.data.collector_uid == request.auth.uid || isStaff());
-        allow update, delete: if false;
+        // A recorded point may never be altered — that is the anti-fraud property.
+        // But it must be re-sendable: the phone marks a point SYNCING, writes it,
+        // then marks it SYNCED, and if it dies between the write and the ack it
+        // retries with the same document id. Under a blanket `update: if false`
+        // that retry is denied, the whole batch fails, and the queue never drains —
+        // the phone reports "tertunda" for good. So an identical replay is allowed
+        // and anything that would change the record is still refused.
+        allow update: if isAuth()
+          && resource.data.collector_uid == request.auth.uid
+          && request.resource.data.collector_uid == resource.data.collector_uid
+          && request.resource.data.lat == resource.data.lat
+          && request.resource.data.lng == resource.data.lng
+          && request.resource.data.captured_at == resource.data.captured_at;
+        allow delete: if false;
       }
     }
 

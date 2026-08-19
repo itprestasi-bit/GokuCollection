@@ -29,8 +29,19 @@ interface ShiftDao {
     @Query("SELECT * FROM shifts WHERE collectorId = :collectorId ORDER BY startedAt DESC LIMIT :limit")
     fun observeRecent(collectorId: String, limit: Int = 20): Flow<List<ShiftEntity>>
 
-    @Query("SELECT * FROM shifts WHERE syncStatus IN ('PENDING','FAILED') ORDER BY startedAt ASC LIMIT :limit")
-    suspend fun pending(limit: Int = 100): List<ShiftEntity>
+    // Scoped to the signed-in account in SQL rather than filtered afterwards. The
+    // worker used to fetch the oldest rows and drop the ones belonging to another
+    // account in memory — so if the oldest batch was entirely someone else's, it
+    // saw an empty list, stopped, and every newer row behind them was stranded.
+    @Query(
+        "SELECT * FROM shifts WHERE syncStatus IN ('PENDING','FAILED') " +
+            "AND (collectorUid = :uid OR collectorUid = '') ORDER BY startedAt ASC LIMIT :limit"
+    )
+    suspend fun pending(uid: String, limit: Int = 100): List<ShiftEntity>
+
+    /** See TelemetryDao.reclaimStuck. */
+    @Query("UPDATE shifts SET syncStatus = 'PENDING' WHERE syncStatus = 'SYNCING'")
+    suspend fun reclaimStuck(): Int
 
     @Query("UPDATE shifts SET syncStatus = :status WHERE id IN (:ids)")
     suspend fun updateSyncStatus(ids: List<String>, status: String)
@@ -47,8 +58,24 @@ interface TelemetryDao {
     @Query("SELECT * FROM telemetry_points WHERE collectorId = :collectorId ORDER BY capturedAt DESC LIMIT 1")
     fun observeLatest(collectorId: String): Flow<TelemetryPointEntity?>
 
-    @Query("SELECT * FROM telemetry_points WHERE syncStatus IN ('PENDING','FAILED') ORDER BY capturedAt ASC LIMIT :limit")
-    suspend fun pending(limit: Int = 250): List<TelemetryPointEntity>
+    @Query(
+        "SELECT * FROM telemetry_points WHERE syncStatus IN ('PENDING','FAILED') " +
+            "AND (collectorUid = :uid OR collectorUid = '') ORDER BY capturedAt ASC LIMIT :limit"
+    )
+    suspend fun pending(uid: String, limit: Int = 250): List<TelemetryPointEntity>
+
+    /**
+     * Returns rows to the queue that were left mid-flight.
+     *
+     * A row is marked SYNCING, uploaded, then marked SYNCED. If the process dies
+     * between the first and last step — which on these handsets it does — the row
+     * stays SYNCING forever: pending() only looks for PENDING and FAILED, so it is
+     * never retried, while the badge counts everything that is not SYNCED and so
+     * shows "tertunda" for good. Only one sync worker runs at a time, so anything
+     * SYNCING when a worker starts is by definition orphaned.
+     */
+    @Query("UPDATE telemetry_points SET syncStatus = 'PENDING' WHERE syncStatus = 'SYNCING'")
+    suspend fun reclaimStuck(): Int
 
     @Query("UPDATE telemetry_points SET syncStatus = :status, receivedAt = :receivedAt WHERE id IN (:ids)")
     suspend fun updateSyncStatus(ids: List<String>, status: String, receivedAt: Long?)
@@ -93,8 +120,15 @@ interface VisitDao {
     @Query("SELECT * FROM visits WHERE collectorId = :collectorId ORDER BY arrivalAt DESC LIMIT :limit")
     fun observeRecent(collectorId: String, limit: Int = 30): Flow<List<VisitEntity>>
 
-    @Query("SELECT * FROM visits WHERE syncStatus IN ('PENDING','FAILED') ORDER BY arrivalAt ASC LIMIT :limit")
-    suspend fun pending(limit: Int = 100): List<VisitEntity>
+    @Query(
+        "SELECT * FROM visits WHERE syncStatus IN ('PENDING','FAILED') " +
+            "AND (collectorUid = :uid OR collectorUid = '') ORDER BY arrivalAt ASC LIMIT :limit"
+    )
+    suspend fun pending(uid: String, limit: Int = 100): List<VisitEntity>
+
+    /** See TelemetryDao.reclaimStuck. */
+    @Query("UPDATE visits SET syncStatus = 'PENDING' WHERE syncStatus = 'SYNCING'")
+    suspend fun reclaimStuck(): Int
 
     @Query("UPDATE visits SET syncStatus = :status WHERE id IN (:ids)")
     suspend fun updateSyncStatus(ids: List<String>, status: String)
