@@ -3,6 +3,7 @@ package com.collectionfield.app.data.remote
 import com.collectionfield.app.data.local.OutletEntity
 import com.collectionfield.app.data.local.ShiftEntity
 import com.collectionfield.app.data.local.TelemetryPointEntity
+import com.collectionfield.app.util.PolylineCodec
 import com.collectionfield.app.data.local.VisitEntity
 import com.collectionfield.app.domain.AssignmentStopRef
 import com.google.firebase.Timestamp
@@ -93,6 +94,48 @@ class FirebaseCloudDataSource {
             }
             batch.commit().awaitResult()
         }
+    }
+
+    /**
+     * Uploads a stretch of trail as a single encoded document.
+     *
+     * The same fixes are also written individually by [syncTelemetry], but thinned
+     * out — those exist for the anti-fraud trigger and the offline alerting, which
+     * need a document per event and do not need every point. This is the opposite
+     * case: the replay wants every point and does not want 14,400 documents. So the
+     * trail goes out twice, in the shape each consumer actually needs, and the dense
+     * copy costs one write per batch instead of one per fix.
+     *
+     * The id is the first fix's timestamp, which makes a re-send idempotent for the
+     * same reason the telemetry ids are: a retry after a lost acknowledgement
+     * rewrites the same document rather than adding a duplicate.
+     */
+    suspend fun syncTrackChunk(shiftId: String, points: List<TelemetryPointEntity>) {
+        if (points.isEmpty()) return
+        val sorted = points.sortedBy { it.capturedAt }
+        val t0 = sorted.first().capturedAt
+
+        firestore.collection("shifts").document(shiftId)
+            .collection("track").document(t0.toString())
+            .set(
+                mapOf(
+                    "collector_uid" to sorted.first().collectorUid,
+                    "collector_id" to sorted.first().collectorId,
+                    "started_at" to Timestamp(Date(t0)),
+                    "ended_at" to Timestamp(Date(sorted.last().capturedAt)),
+                    "point_count" to sorted.size,
+                    "path" to PolylineCodec.encodePath(sorted.map { it.lat to it.lng }),
+                    // Seconds since started_at, so the replay keeps real timing
+                    // instead of assuming an even cadence across dropped fixes.
+                    "time_offsets" to PolylineCodec.encodeValues(
+                        sorted.map { (it.capturedAt - t0) / 1000 },
+                    ),
+                    "speeds" to PolylineCodec.encodeValues(
+                        PolylineCodec.speedsToDeci(sorted.map { it.speedMps }),
+                    ),
+                ),
+            )
+            .awaitResult()
     }
 
     suspend fun syncVisits(visits: List<VisitEntity>) {

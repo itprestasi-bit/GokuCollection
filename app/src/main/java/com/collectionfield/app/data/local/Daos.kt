@@ -77,6 +77,18 @@ interface TelemetryDao {
     @Query("UPDATE telemetry_points SET syncStatus = 'PENDING' WHERE syncStatus = 'SYNCING'")
     suspend fun reclaimStuck(): Int
 
+    /**
+     * Drops trail already safely uploaded and older than the retention window.
+     *
+     * Recording every fix rather than every tenth means this table grows roughly
+     * fifteen times faster — about 14,000 rows per collector per day. It is only a
+     * local cache of something Firestore now holds, so keeping a fortnight of it is
+     * generous; without this it would grow for the life of the install.
+     */
+    @Query("DELETE FROM telemetry_points WHERE syncStatus = 'SYNCED' AND capturedAt < :olderThanMs")
+    suspend fun pruneSynced(olderThanMs: Long): Int
+
+
     @Query("UPDATE telemetry_points SET syncStatus = :status, receivedAt = :receivedAt WHERE id IN (:ids)")
     suspend fun updateSyncStatus(ids: List<String>, status: String, receivedAt: Long?)
 }

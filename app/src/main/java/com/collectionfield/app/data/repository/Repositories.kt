@@ -121,6 +121,7 @@ class TelemetryRepository(private val db: CollectionDatabase) {
     suspend fun insert(point: TelemetryPointEntity) = db.telemetryDao().insert(point)
     suspend fun pending(uid: String, limit: Int = 250) = db.telemetryDao().pending(uid, limit)
     suspend fun reclaimStuck(): Int = db.telemetryDao().reclaimStuck()
+    suspend fun pruneSynced(olderThanMs: Long): Int = db.telemetryDao().pruneSynced(olderThanMs)
     suspend fun updateSync(ids: List<String>, status: SyncStatus, receivedAt: Long? = null) {
         if (ids.isNotEmpty()) db.telemetryDao().updateSyncStatus(ids, status.name, receivedAt)
     }

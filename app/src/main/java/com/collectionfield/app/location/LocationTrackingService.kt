@@ -377,8 +377,13 @@ class LocationTrackingService : Service() {
                 lowConfidence = lowConfidence,
             )
 
+            // Every accepted fix is kept locally. Room is on the phone and a row
+            // costs nothing to write; what used to be thrown away here is exactly
+            // the detail that made a replay look like four pins and a straight
+            // line. The upload is still paced by recordTrail, so density on the
+            // phone does not become chatter on the network.
+            container.telemetryRepository.insert(point)
             if (decision.recordTrail) {
-                container.telemetryRepository.insert(point)
                 TelemetrySyncWorker.enqueue(applicationContext)
             }
 

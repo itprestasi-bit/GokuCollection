@@ -65,9 +65,23 @@ class TelemetrySyncWorker(
             val ids = points.map { it.id }
             container.telemetryRepository.updateSync(ids, SyncStatus.SYNCING)
             try {
-                cloud.syncTelemetry(points.map { point ->
+                val owned = points.map { point ->
                     if (point.collectorUid.isBlank()) point.copy(collectorUid = session.uid) else point
-                })
+                }
+
+                // Dense: every fix, encoded, one document per batch. This is what
+                // the replay reads.
+                owned.groupBy { it.shiftId }.forEach { (shiftId, chunk) ->
+                    cloud.syncTrackChunk(shiftId, chunk)
+                }
+
+                // Thinned: one document per fix, but only every
+                // TELEMETRY_SPACING_MS. The anti-fraud trigger and the offline
+                // alerting are per-document consumers and neither gains anything
+                // from a point every two seconds — they would just cost 15x the
+                // writes and 15x the function invocations to learn the same thing.
+                cloud.syncTelemetry(thinned(owned))
+
                 container.telemetryRepository.updateSync(
                     ids = ids,
                     status = SyncStatus.SYNCED,
@@ -94,11 +108,35 @@ class TelemetrySyncWorker(
             }
         }
 
+        container.telemetryRepository.pruneSynced(
+            System.currentTimeMillis() - LOCAL_RETENTION_MS,
+        )
+
         return Result.success()
     }
 
+    /** Keeps the first fix of each [TELEMETRY_SPACING_MS] window, per shift. */
+    private fun thinned(points: List<com.collectionfield.app.data.local.TelemetryPointEntity>) =
+        points.sortedBy { it.capturedAt }
+            .groupBy { it.shiftId }
+            .flatMap { (_, ofShift) ->
+                var lastKept = Long.MIN_VALUE
+                ofShift.filter { point ->
+                    if (point.capturedAt - lastKept >= TELEMETRY_SPACING_MS) {
+                        lastKept = point.capturedAt
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+
     companion object {
         private const val UNIQUE_WORK = "firebase-field-sync"
+        /** Spacing of the per-document telemetry copy. See the note at the call site. */
+        private const val TELEMETRY_SPACING_MS = 30_000L
+        /** How long uploaded trail is kept on the phone before being pruned. */
+        private const val LOCAL_RETENTION_MS = 14L * 24 * 60 * 60 * 1000
 
         fun enqueue(context: Context) {
             val constraints = Constraints.Builder()

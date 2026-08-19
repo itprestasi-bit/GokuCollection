@@ -87,6 +87,20 @@ service cloud.firestore {
       );
       allow delete: if isAuth() && role() == 'admin';
 
+      // The dense encoded trail. Same ownership rules as telemetry: the collector
+      // writes their own and may re-send an identical copy after a lost
+      // acknowledgement, staff may read it, nobody may alter or delete a record.
+      match /track/{chunkId} {
+        allow create: if isAuth() && request.resource.data.collector_uid == request.auth.uid;
+        allow read: if isAuth() && (resource.data.collector_uid == request.auth.uid || isStaff());
+        allow update: if isAuth()
+          && resource.data.collector_uid == request.auth.uid
+          && request.resource.data.collector_uid == resource.data.collector_uid
+          && request.resource.data.path == resource.data.path
+          && request.resource.data.started_at == resource.data.started_at;
+        allow delete: if false;
+      }
+
       match /telemetry/{pointId} {
         allow create: if isAuth() && request.resource.data.collector_uid == request.auth.uid;
         allow read: if isAuth() && (resource.data.collector_uid == request.auth.uid || isStaff());
