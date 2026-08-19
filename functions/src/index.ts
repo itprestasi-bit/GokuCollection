@@ -40,6 +40,19 @@ const VALID_ROLES = ["collector", "supervisor", "admin", "management"] as const;
 const roadsApiKey = defineSecret("ROADS_API_KEY");
 
 /**
+ * The key, with surrounding whitespace removed.
+ *
+ * A secret is set by pasting, and a paste carries whatever the clipboard held —
+ * a trailing newline at minimum, which is invisible in every console that
+ * displays it. In a URL that produced "API key not valid"; in the
+ * X-Goog-Api-Key header it is an outright invalid header. Trimming here costs
+ * nothing and removes a failure whose cause is unreadable from the error.
+ */
+function apiKey(): string {
+  return roadsApiKey.value().trim();
+}
+
+/**
  * Admin-only: creates a real Firebase Auth account (email {code}@collectionfield.app,
  * password = PIN) plus the matching `users/{uid}` profile. The dashboard's client SDK
  * can't create *other* users' accounts on its own (it would hijack the caller's
@@ -183,7 +196,7 @@ export const snapShiftTrack = onCall({ secrets: [roadsApiKey] }, async (request)
     const path = batch.map((p) => `${p.lat},${p.lng}`).join("|");
     const url =
       `https://roads.googleapis.com/v1/snapToRoads?interpolate=true` +
-      `&path=${encodeURIComponent(path)}&key=${roadsApiKey.value()}`;
+      `&path=${encodeURIComponent(path)}&key=${apiKey()}`;
 
     const res = await fetch(url);
     const body = (await res.json()) as {
@@ -247,7 +260,7 @@ export const snapPath = onCall({ secrets: [roadsApiKey] }, async (request) => {
   const path = points.map((p) => `${p.lat},${p.lng}`).join("|");
   const res = await fetch(
     `https://roads.googleapis.com/v1/snapToRoads?interpolate=false` +
-      `&path=${encodeURIComponent(path)}&key=${roadsApiKey.value()}`,
+      `&path=${encodeURIComponent(path)}&key=${apiKey()}`,
   );
   const body = (await res.json()) as {
     snappedPoints?: { location: { latitude: number; longitude: number } }[];
@@ -317,7 +330,7 @@ export const planRoute = onCall({ secrets: [roadsApiKey] }, async (request) => {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Goog-Api-Key": roadsApiKey.value(),
+        "X-Goog-Api-Key": apiKey(),
         "X-Goog-FieldMask":
           "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline," +
           "routes.optimizedIntermediateWaypointIndex",
