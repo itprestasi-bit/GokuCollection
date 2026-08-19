@@ -177,7 +177,7 @@ class LocationRefinerTest {
         // 800 m away, well beyond the fix's own 100 m error — a real contradiction,
         // but not yet worth acting on while good fixes might still turn up.
         val far = baseLat + metresToLat(800.0)
-        t += 30_000
+        t += 5_000
         assertNull(
             "fix kasar yang bertentangan tidak boleh langsung dipakai",
             feed(refiner, far, baseLng, t, accuracyM = 100f, isStationary = false),
@@ -185,7 +185,7 @@ class LocationRefinerTest {
 
         // Past the silence window with nothing better: a rough position now beats a
         // confidently stale one, otherwise the marker would sit there forever.
-        t += 130_000
+        t += 25_000
         assertNotNull(
             "setelah lama tanpa fix bagus, posisi kasar harus dipakai",
             feed(refiner, far, baseLng, t, accuracyM = 100f, isStationary = false),

@@ -139,8 +139,23 @@ class LocationRefiner {
             // pinned to zero the whole time — a collector walking down a street
             // showed on the dashboard as standing still. Noise on a moving phone is
             // a smaller problem than a moving phone that reads as parked.
-            val scale = if (isStationary) ACCURACY_CONFIDENCE_SCALE else SLOW_CONFIDENCE_SCALE
-            val jitterRadiusM = (accuracyM * scale).coerceAtLeast(MIN_JITTER_RADIUS_M)
+            // How far the phone must move before the marker follows, graded by how
+            // much the fix can be trusted. The old rule was a flat multiple of the
+            // reported accuracy with an 8 m floor, which at the previous 50 m
+            // ceiling meant a 19 m gate — wide enough that a walking collector
+            // barely cleared it. With poor fixes now rejected outright the gate can
+            // be metres rather than tens of metres.
+            val movementGateM = when {
+                accuracyM <= 7f -> 2.0f
+                accuracyM <= PREFERRED_ACCURACY_M -> 2.5f
+                accuracyM <= 12f -> 3.5f
+                else -> 4.5f
+            }
+            val jitterRadiusM = if (isStationary) {
+                (accuracyM * ACCURACY_CONFIDENCE_SCALE).coerceAtLeast(MIN_JITTER_RADIUS_M)
+            } else {
+                movementGateM
+            }
 
             // GPS derives speed from Doppler shift, not from the positions it is
             // being asked to smooth, so it answers "is this thing moving" in a
@@ -155,8 +170,20 @@ class LocationRefiner {
             // the map. Doppler is the honest signal in both directions — it releases
             // in one fix when someone sets off, and it stays low when they have not.
             // isStationary now only widens the radius once the slower signals agree.
-            val movingNow = rawSpeedMps >= MOVING_SPEED_OVERRIDE_MPS
-            if (movingNow) {
+            // A tighter fix than the last one is new information even standing
+            // still: the position refines in place instead of waiting for the
+            // collector to walk far enough to clear the noise gate. Without this a
+            // marker that locked on at 14 m stayed at 14 m until someone moved.
+            val sharper = accuracyM <= lastAcceptedAccuracyM - ACCURACY_IMPROVEMENT_M
+
+            // ...and the converse: a fix that is *worse* than a good one it would
+            // replace must show real movement first, or a settled marker gets
+            // dragged around by the first degraded reading that arrives.
+            val degrading = lastAcceptedAccuracyM in 0.01f..PREFERRED_ACCURACY_M &&
+                accuracyM > PREFERRED_ACCURACY_M && jitterM < DEGRADED_MOVE_M
+
+            val movingNow = rawSpeedMps >= MOVING_SPEED_OVERRIDE_MPS && !degrading
+            if (movingNow || (sharper && !degrading)) {
                 consecutiveEscapes = 0
             } else if (jitterM < jitterRadiusM) {
                 effectiveLat = prevLat
@@ -274,8 +301,33 @@ class LocationRefiner {
     }
 
     companion object {
-        private const val MAX_ACCEPTABLE_ACCURACY_M = 50f
-        private const val MAX_SILENCE_MS = 120_000L
+        /**
+         * Hard ceiling. A fix reporting worse than this is not used as a position.
+         *
+         * Reported accuracy is not something the app chooses — the GPS states it.
+         * The only lever that raises it is refusing the poor ones, which is why
+         * this moved from 50 m to 15 m: at 50 m the pipeline was free to publish a
+         * position it had been told was half a football field wide. The cost is
+         * availability, and it is paid for by the hold below rather than by the
+         * marker vanishing.
+         */
+        private const val MAX_ACCEPTABLE_ACCURACY_M = 15f
+        /** Below this a fix is trusted enough to move the marker on small displacement. */
+        private const val PREFERRED_ACCURACY_M = 10f
+        /** A fix this much tighter than the last is worth taking even standing still. */
+        private const val ACCURACY_IMPROVEMENT_M = 2f
+        /**
+         * How long the filter will hold out for a fix inside the ceiling before
+         * taking whatever it can get.
+         *
+         * The ceiling is a preference, not a refusal. Measured against an urban
+         * alley, a hard 15 m reject published 4% of fixes and left 122-second gaps
+         * — the marker effectively disappeared, which is worse than a marker that
+         * is honestly labelled as rough. Twenty seconds keeps the position alive
+         * while still preferring a good fix whenever one exists; the accuracy
+         * travels with the position, so the dashboard can say which it is.
+         */
+        private const val MAX_SILENCE_MS = 20_000L
         private const val MAX_PLAUSIBLE_SPEED_MPS = 41.7 // ~150 km/h — generous for toll-road travel, still catches teleports
         private const val MAX_CONSECUTIVE_REJECTS = 3
         private const val MIN_JITTER_RADIUS_M = 8f
@@ -290,12 +342,8 @@ class LocationRefiner {
          * releasing the marker rather than holding it.
          */
         private const val MOVING_SPEED_OVERRIDE_MPS = 1.0f
-        /**
-         * Hold radius while the speed says still but the classifiers have not agreed
-         * yet. Narrower than the parked radius so genuine slow travel still escapes
-         * after a couple of fixes.
-         */
-        private const val SLOW_CONFIDENCE_SCALE = 1.0f
+        /** Displacement a degraded fix must show before it may replace a good one. */
+        private const val DEGRADED_MOVE_M = 8.0
         /**
          * Floor for a standing or slow phone. Measured: dropping this to 2.0 cost
          * a walker 3 m of extra lag for no visible gain in steadiness, since the
