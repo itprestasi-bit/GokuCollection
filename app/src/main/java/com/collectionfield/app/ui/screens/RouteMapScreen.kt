@@ -24,6 +24,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.collectionfield.app.BuildConfig
 import com.collectionfield.app.util.LocationPermissions
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
@@ -99,6 +100,23 @@ fun RouteMapScreen(
                     }) {
                         Text("Buka Pengaturan")
                     }
+                }
+            } else if (!BuildConfig.HAS_MAPS_KEY) {
+                // A Google map with no key draws its controls and its logo and
+                // nothing else — an empty canvas that looks like a broken feature
+                // rather than a missing setting. Say which it is.
+                Column(
+                    modifier = Modifier.align(Alignment.Center).fillMaxWidth().padding(horizontal = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("Peta belum bisa ditampilkan", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Kunci Maps SDK belum dipasang di aplikasi ini. Hubungi admin — " +
+                            "isi MAPS_API_KEY di local.properties lalu build ulang.",
+                        textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             } else if (currentLoc == null) {
                 CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))

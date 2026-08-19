@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -11,6 +13,24 @@ if (file("google-services.json").exists() && file("google-services.json").length
     apply(plugin = "com.google.gms.google-services")
 }
 
+/**
+ * The Maps SDK key, read from local.properties (gitignored) rather than written
+ * into the manifest.
+ *
+ * The manifest previously carried the literal string YOUR_MAPS_API_KEY_HERE, so
+ * every map in the app rendered as an empty canvas — controls and the Google logo
+ * present, no tiles, no markers. It went unnoticed because the route screen was
+ * the first place the app drew a map at all.
+ *
+ * An empty default keeps the project building on a machine that has no key; the
+ * map will be blank there, which is the honest outcome, and the reason is stated
+ * on screen rather than left to guesswork.
+ */
+val mapsApiKey: String = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}.getProperty("MAPS_API_KEY") ?: System.getenv("MAPS_API_KEY") ?: ""
+
 android {
     namespace = "com.collectionfield.app"
     compileSdk = 37
@@ -23,6 +43,9 @@ android {
         versionName = "0.2.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        manifestPlaceholders["MAPS_API_KEY"] = mapsApiKey
+        buildConfigField("boolean", "HAS_MAPS_KEY", (mapsApiKey.isNotBlank()).toString())
     }
 
     buildFeatures {
