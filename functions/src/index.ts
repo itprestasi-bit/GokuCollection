@@ -272,6 +272,92 @@ export const snapPath = onCall({ secrets: [roadsApiKey] }, async (request) => {
   return { points: snapped };
 });
 
+/**
+ * Plans the driving route through today's stops, along real roads.
+ *
+ * The route screen used to join the collector's position to each outlet with
+ * straight lines, which shows the order but not the journey — a line across a
+ * river tells a rider nothing about how to get there, and the distance it implies
+ * is not the distance they will travel.
+ *
+ * Google's Routes API returns the road geometry, the driving distance and an
+ * estimated duration, and will reorder the intermediate stops for the shortest
+ * total trip. That last part replaces the app's own nearest-neighbour ordering,
+ * which is a greedy heuristic that ignores one-way streets, turn restrictions and
+ * the river.
+ *
+ * TWO_WHEELER is asked for first because collectors ride motorbikes and the road
+ * network available to them is not the one a car uses; DRIVE is the fallback where
+ * two-wheeler routing is not offered.
+ *
+ * Volume is small by construction — a plan is per collector per screen opening,
+ * not per position — so this is nothing like the live snapping in cost.
+ */
+export const planRoute = onCall({ secrets: [roadsApiKey] }, async (request) => {
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "Perlu login untuk merencanakan rute.");
+  }
+
+  const data = request.data as {
+    origin?: { lat: number; lng: number };
+    stops?: { lat: number; lng: number }[];
+  };
+  const origin = data?.origin;
+  const stops = (data?.stops ?? []).filter((p) => Number.isFinite(p?.lat) && Number.isFinite(p?.lng));
+  if (!origin || !Number.isFinite(origin.lat) || stops.length === 0) {
+    throw new HttpsError("invalid-argument", "Butuh posisi awal dan minimal satu tujuan.");
+  }
+
+  const waypoint = (p: { lat: number; lng: number }) => ({
+    location: { latLng: { latitude: p.lat, longitude: p.lng } },
+  });
+
+  const call = async (travelMode: string) => {
+    const res = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": roadsApiKey.value(),
+        "X-Goog-FieldMask":
+          "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline," +
+          "routes.optimizedIntermediateWaypointIndex",
+      },
+      body: JSON.stringify({
+        origin: waypoint(origin),
+        destination: waypoint(stops[stops.length - 1]),
+        intermediates: stops.slice(0, -1).map(waypoint),
+        travelMode,
+        // Only meaningful with intermediates; harmless otherwise.
+        optimizeWaypointOrder: stops.length > 2,
+      }),
+    });
+    return { ok: res.ok, status: res.status, body: (await res.json()) as any };
+  };
+
+  let result = await call("TWO_WHEELER");
+  if (!result.ok) result = await call("DRIVE");
+
+  if (!result.ok || result.body?.error) {
+    const detail = result.body?.error?.message ?? `HTTP ${result.status}`;
+    logger.error("computeRoutes failed", detail);
+    throw new HttpsError("unavailable", `Routes API menolak permintaan: ${detail}`);
+  }
+
+  const route = result.body?.routes?.[0];
+  if (!route?.polyline?.encodedPolyline) {
+    throw new HttpsError("unavailable", "Routes API tidak mengembalikan jalur.");
+  }
+
+  return {
+    polyline: route.polyline.encodedPolyline as string,
+    distanceMeters: route.distanceMeters ?? 0,
+    // Comes back as a string of seconds, e.g. "1245s".
+    durationSeconds: Number(String(route.duration ?? "0s").replace("s", "")) || 0,
+    // Present only when reordering was requested; the caller relabels its markers.
+    order: (route.optimizedIntermediateWaypointIndex ?? []) as number[],
+  };
+});
+
 /** Keeps points at least [spacingM] apart, always keeping the first and last. */
 function thin(points: { lat: number; lng: number }[], spacingM: number) {
   const out = [points[0]];

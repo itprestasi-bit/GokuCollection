@@ -24,6 +24,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.material3.Surface
+import com.google.android.gms.maps.model.Dot
+import com.google.android.gms.maps.model.Gap
 import com.collectionfield.app.BuildConfig
 import com.collectionfield.app.util.LocationPermissions
 import com.google.android.gms.location.LocationServices
@@ -79,6 +82,14 @@ fun RouteMapScreen(
 
     Scaffold { padding ->
         Box(modifier = Modifier.padding(padding).fillMaxSize()) {
+            val summary = if (state.routeDistanceM > 0) {
+                "%.1f km · %d menit · %d tujuan".format(
+                    state.routeDistanceM / 1000.0,
+                    (state.routeDurationSec / 60).coerceAtLeast(1),
+                    state.optimizedRoute.size,
+                )
+            } else null
+
             val currentLoc = userLocation
             if (permissionDenied) {
                 Column(
@@ -152,15 +163,37 @@ fun RouteMapScreen(
                         )
                     }
 
-                    // Polyline connecting the route
-                    if (state.optimizedRoute.isNotEmpty()) {
-                        val points = mutableListOf(currentLoc)
-                        points.addAll(state.optimizedRoute.map { LatLng(it.latitude, it.longitude) })
-
+                    // The road route when the server could plan one, straight lines
+                    // otherwise. The fallback is deliberate: a line across a river
+                    // still shows the order of the stops, and a rider who can see
+                    // that can work — an empty map cannot be worked with at all.
+                    if (state.routePath.isNotEmpty()) {
                         Polyline(
-                            points = points,
+                            points = state.routePath.map { LatLng(it.first, it.second) },
                             color = routeColor,
-                            width = 8f
+                            width = 12f,
+                        )
+                    } else if (state.optimizedRoute.isNotEmpty()) {
+                        Polyline(
+                            points = listOf(currentLoc) + state.optimizedRoute.map { LatLng(it.latitude, it.longitude) },
+                            color = routeColor,
+                            width = 6f,
+                            pattern = listOf(Dot(), Gap(12f)),
+                        )
+                    }
+                }
+
+                summary?.let {
+                    Surface(
+                        modifier = Modifier.align(Alignment.TopCenter).padding(12.dp),
+                        shape = MaterialTheme.shapes.medium,
+                        tonalElevation = 3.dp,
+                        shadowElevation = 3.dp,
+                    ) {
+                        Text(
+                            it,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.labelLarge,
                         )
                     }
                 }

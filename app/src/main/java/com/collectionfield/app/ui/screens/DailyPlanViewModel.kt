@@ -18,6 +18,10 @@ data class DailyPlanUiState(
     val isLoading: Boolean = false,
     val plan: VisitPlan? = null,
     val optimizedRoute: List<VisitOutlet> = emptyList(),
+    /** Road geometry from the Routes API. Empty means the map falls back to straight lines. */
+    val routePath: List<Pair<Double, Double>> = emptyList(),
+    val routeDistanceM: Double = 0.0,
+    val routeDurationSec: Long = 0L,
     val error: String? = null
 )
 
@@ -61,7 +65,34 @@ class DailyPlanViewModel(
                 ?.filter { GeoMath.isValidIndonesiaCoordinate(it.latitude, it.longitude) }
                 ?: emptyList()
             val optimized = RouteOptimizer.optimize(currentLat, currentLng, pendingOutlets)
-            _state.update { it.copy(optimizedRoute = optimized) }
+            _state.update { it.copy(optimizedRoute = optimized, routePath = emptyList()) }
+            if (optimized.isEmpty()) return@launch
+
+            // Ask the server for the actual roads. The local optimiser is a greedy
+            // nearest-neighbour walk that knows nothing about one-way streets, turn
+            // restrictions or rivers, so when the server reorders the stops its
+            // answer replaces ours — and its polyline is the route the collector
+            // will really ride rather than a line drawn over the top of the city.
+            val route = container.cloudDataSource?.planRoute(
+                origin = currentLat to currentLng,
+                stops = optimized.map { it.latitude to it.longitude },
+            ) ?: return@launch
+
+            val reordered = if (route.order.size == optimized.size - 1) {
+                // The server orders the intermediates only; the final stop stays put.
+                route.order.mapNotNull { optimized.getOrNull(it) } + optimized.last()
+            } else {
+                optimized
+            }
+
+            _state.update {
+                it.copy(
+                    optimizedRoute = reordered.mapIndexed { i, o -> o.copy(urutanRute = i + 1) },
+                    routePath = route.points,
+                    routeDistanceM = route.distanceMeters,
+                    routeDurationSec = route.durationSeconds,
+                )
+            }
         }
     }
 }

@@ -13,6 +13,7 @@ import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.functions.FirebaseFunctions
 import com.google.firebase.firestore.SetOptions
 import org.json.JSONObject
 import java.util.Date
@@ -22,9 +23,22 @@ import java.util.Date
  * (shifts, telemetry trail, visits, outlets, users), Realtime Database only
  * for the ephemeral live_locations feed the dashboard's map subscribes to.
  */
+/** A road route returned by the Routes API, already decoded. */
+data class PlannedRoute(
+    val points: List<Pair<Double, Double>>,
+    val distanceMeters: Double,
+    val durationSeconds: Long,
+    /** Order the server put the intermediate stops in, empty if it did not reorder. */
+    val order: List<Int>,
+)
+
 class FirebaseCloudDataSource {
     private val firestore: FirebaseFirestore get() = FirebaseFirestore.getInstance()
     private val realtime: FirebaseDatabase get() = FirebaseDatabase.getInstance()
+
+    // Functions live in asia-southeast2 (Eventarc pins Firestore triggers to the
+    // database's region), so the default us-central1 lookup would 404 every call.
+    private val functions: FirebaseFunctions get() = FirebaseFunctions.getInstance("asia-southeast2")
 
     suspend fun syncShifts(shifts: List<ShiftEntity>) {
         if (shifts.isEmpty()) return
@@ -137,6 +151,39 @@ class FirebaseCloudDataSource {
             )
             .awaitResult()
     }
+
+    /**
+     * The driving route through today's stops, as road geometry.
+     *
+     * Straight lines between stops show the order but not the journey — and the
+     * distance they imply is not the distance the collector will ride. This asks
+     * the server, which holds the Routes API key; the key is billable and has no
+     * business being on a device that leaves the office.
+     *
+     * Returns null on any failure. The screen keeps its straight-line fallback,
+     * because a rough route beats an empty map, and a rider who can see the order
+     * of their stops can still work.
+     */
+    suspend fun planRoute(
+        origin: Pair<Double, Double>,
+        stops: List<Pair<Double, Double>>,
+    ): PlannedRoute? = runCatching {
+        val payload = mapOf(
+            "origin" to mapOf("lat" to origin.first, "lng" to origin.second),
+            "stops" to stops.map { mapOf("lat" to it.first, "lng" to it.second) },
+        )
+        val result = functions.getHttpsCallable("planRoute").call(payload).awaitResult()
+
+        @Suppress("UNCHECKED_CAST")
+        val data = result.data as? Map<String, Any?> ?: return@runCatching null
+        val encoded = data["polyline"] as? String ?: return@runCatching null
+        PlannedRoute(
+            points = PolylineCodec.decodePath(encoded),
+            distanceMeters = (data["distanceMeters"] as? Number)?.toDouble() ?: 0.0,
+            durationSeconds = (data["durationSeconds"] as? Number)?.toLong() ?: 0L,
+            order = (data["order"] as? List<*>)?.mapNotNull { (it as? Number)?.toInt() }.orEmpty(),
+        )
+    }.getOrNull()
 
     suspend fun syncVisits(visits: List<VisitEntity>) {
         if (visits.isEmpty()) return
