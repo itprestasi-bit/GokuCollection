@@ -70,29 +70,47 @@ export interface CreateAlertInput {
   message: string;
 }
 
-const DEDUPE_WINDOW_MS = 5 * 60_000;
-
 /**
  * Written exclusively from here (Admin SDK bypasses security rules) — the `alerts`
  * Firestore rule denies client-side create entirely, so a collector can never
  * suppress or fabricate their own compliance record.
  *
- * De-duplicates: skips creating a new alert if an `open` one of the same type for
- * the same shift was already raised within the last 5 minutes, so a sustained
- * condition (e.g. a shift that's been offline for an hour) doesn't flood the list.
+ * One standing condition produces one alert, however long it lasts.
+ *
+ * This used to skip a duplicate only if an identical open alert had been raised in
+ * the previous five minutes — while scanActiveShifts, which raises most of them,
+ * runs every ten. The window therefore never once matched: a shift that went
+ * offline at 09:00 and was still offline at 13:30 filed 25 separate alerts saying
+ * the same thing with a larger number in it, and 49 of the 50 alerts in the system
+ * were that one condition repeating.
+ *
+ * So the check is now on the standing alert itself rather than on a time window.
+ * A recurrence refreshes the existing alert — the message carries the current
+ * figure, `occurrences` records how many times it has been seen, `last_seen_at`
+ * when. Resolve it and a genuinely new occurrence opens a fresh one, which is the
+ * behaviour an operator expects from a list they have just cleared.
  */
 export async function createAlert(input: CreateAlertInput): Promise<void> {
-  if (input.shift_id) {
-    const since = new Date(Date.now() - DEDUPE_WINDOW_MS);
-    const recent = await db
-      .collection("alerts")
-      .where("shift_id", "==", input.shift_id)
-      .where("type", "==", input.type)
-      .where("status", "==", "open")
-      .where("created_at", ">=", since)
-      .limit(1)
-      .get();
-    if (!recent.empty) return;
+  // An alert without a shift (a device change, say) still belongs to a collector,
+  // and should not be allowed to repeat either — the old code skipped dedupe for
+  // those entirely.
+  const scope = db
+    .collection("alerts")
+    .where("type", "==", input.type)
+    .where("status", "==", "open");
+  const query = input.shift_id
+    ? scope.where("shift_id", "==", input.shift_id)
+    : scope.where("collector_uid", "==", input.collector_uid);
+
+  const existing = await query.limit(1).get();
+  if (!existing.empty) {
+    await existing.docs[0].ref.update({
+      message: input.message,
+      severity: input.severity,
+      occurrences: FieldValue.increment(1),
+      last_seen_at: FieldValue.serverTimestamp(),
+    });
+    return;
   }
 
   await db.collection("alerts").add({
@@ -100,7 +118,9 @@ export async function createAlert(input: CreateAlertInput): Promise<void> {
     shift_id: input.shift_id ?? null,
     status: "open",
     resolution_note: null,
+    occurrences: 1,
     created_at: FieldValue.serverTimestamp(),
+    last_seen_at: FieldValue.serverTimestamp(),
   });
 }
 
