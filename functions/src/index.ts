@@ -5,6 +5,8 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { HttpsError, onCall } from "firebase-functions/v2/https";
 import { logger, setGlobalOptions } from "firebase-functions/v2";
 import { createAlert, db, distanceMeters, getParams } from "./helpers";
+import { decodePath, encodePath, distanceMeters as geoDistance } from "./polyline";
+import { defineSecret } from "firebase-functions/params";
 
 // The Admin app is initialised in ./helpers, which loads first (see note there).
 
@@ -16,7 +18,26 @@ import { createAlert, db, distanceMeters, getParams } from "./helpers";
 // getFunctions(app, "asia-southeast2"), otherwise callables 404 in us-central1.
 setGlobalOptions({ region: "asia-southeast2", maxInstances: 10 });
 
+/** Roads API accepts at most 100 points per request. */
+const ROADS_BATCH = 100;
+/** Spacing the trail is thinned to before snapping; interpolate fills the rest. */
+const MIN_SNAP_SPACING_M = 25;
+/** Ceiling on points per shift, so one long day cannot run up unbounded calls. */
+const MAX_SNAP_POINTS = 5_000;
+
 const VALID_ROLES = ["collector", "supervisor", "admin", "management"] as const;
+
+/**
+ * Server-side key for the Roads API.
+ *
+ * Deliberately not the key the browser bundle carries. That one is public by
+ * construction and restricted by HTTP referrer, which the Roads API ignores —
+ * it has no CORS support and cannot be called from a page at all. This key is
+ * IP-restricted or unrestricted and must never leave the server.
+ *
+ *   firebase apphosting:secrets:set ROADS_API_KEY   (or functions:secrets:set)
+ */
+const roadsApiKey = defineSecret("ROADS_API_KEY");
 
 /**
  * Admin-only: creates a real Firebase Auth account (email {code}@collectionfield.app,
@@ -92,6 +113,119 @@ export const createUser = onCall(async (request) => {
 
   return { uid: userRecord.uid, email };
 });
+
+/**
+ * Redraws a shift's GPS trail along the roads it was actually driven on.
+ *
+ * Raw GPS sits beside the carriageway, wanders between lanes and cuts corners
+ * between fixes; snapped, the line follows the road and the replay reads like a
+ * recording rather than a sketch. Google's Roads API does the matching.
+ *
+ * Three things shape this design:
+ *
+ *  - **It runs on the server** because the Roads API has no CORS support. There
+ *    is no browser-side option to weigh up.
+ *  - **The result is cached on the shift.** Snapping the same finished day twice
+ *    buys nothing and costs the same again, so a second viewer reads the stored
+ *    polyline. Only `force` re-snaps.
+ *  - **The trail is thinned first.** The API accepts 100 points per request, and
+ *    with interpolate=true it returns the road geometry *between* the points it
+ *    is given — so feeding it a fix every two seconds costs 144 requests per
+ *    shift to draw the same line that one every 25 metres draws in about 25.
+ *
+ * The snapped line is for display only. Distance, stop detection and the geofence
+ * keep using raw GPS: map matching guesses, and a guess that puts a collector on
+ * the road outside an outlet must never become evidence about whether they were
+ * inside it.
+ */
+export const snapShiftTrack = onCall({ secrets: [roadsApiKey] }, async (request) => {
+  const role = request.auth?.token.role;
+  if (!request.auth || !["admin", "supervisor", "management"].includes(String(role))) {
+    throw new HttpsError("permission-denied", "Hanya staff yang boleh menjalankan snap-to-road.");
+  }
+
+  const shiftId = String((request.data as { shiftId?: string })?.shiftId ?? "");
+  const force = Boolean((request.data as { force?: boolean })?.force);
+  if (!shiftId) throw new HttpsError("invalid-argument", "shiftId wajib diisi.");
+
+  const shiftRef = db.collection("shifts").doc(shiftId);
+  const shiftSnap = await shiftRef.get();
+  if (!shiftSnap.exists) throw new HttpsError("not-found", "Shift tidak ditemukan.");
+
+  const cached = shiftSnap.get("snapped_path");
+  if (!force && typeof cached === "string" && cached.length > 0) {
+    return { path: cached, cached: true, pointCount: shiftSnap.get("snapped_point_count") ?? null };
+  }
+
+  const chunks = await shiftRef.collection("track").orderBy("started_at", "asc").get();
+  const raw: { lat: number; lng: number }[] = [];
+  chunks.forEach((doc) => raw.push(...decodePath(String(doc.get("path") ?? ""))));
+  if (raw.length < 2) {
+    throw new HttpsError("failed-precondition", "Jejak shift ini terlalu pendek untuk ditempelkan ke jalan.");
+  }
+
+  // Thin to a fixed spacing, and widen that spacing if the day was long enough
+  // that even thinned it would exceed the request ceiling. A runaway shift should
+  // cost a bounded number of calls, not an unbounded one.
+  let spacing = MIN_SNAP_SPACING_M;
+  let thinned = thin(raw, spacing);
+  while (thinned.length > MAX_SNAP_POINTS) {
+    spacing *= 2;
+    thinned = thin(raw, spacing);
+  }
+
+  const snapped: { lat: number; lng: number }[] = [];
+  // One point of overlap between requests, otherwise each batch is matched in
+  // isolation and the joins show as small jumps.
+  for (let i = 0; i < thinned.length; i += ROADS_BATCH - 1) {
+    const batch = thinned.slice(i, i + ROADS_BATCH);
+    if (batch.length < 2) break;
+    const path = batch.map((p) => `${p.lat},${p.lng}`).join("|");
+    const url =
+      `https://roads.googleapis.com/v1/snapToRoads?interpolate=true` +
+      `&path=${encodeURIComponent(path)}&key=${roadsApiKey.value()}`;
+
+    const res = await fetch(url);
+    const body = (await res.json()) as {
+      snappedPoints?: { location: { latitude: number; longitude: number } }[];
+      error?: { message?: string; status?: string };
+    };
+    if (!res.ok || body.error) {
+      const detail = body.error?.message ?? `HTTP ${res.status}`;
+      logger.error("snapToRoads failed", detail);
+      throw new HttpsError("unavailable", `Roads API menolak permintaan: ${detail}`);
+    }
+    for (const p of body.snappedPoints ?? []) {
+      snapped.push({ lat: p.location.latitude, lng: p.location.longitude });
+    }
+  }
+
+  if (snapped.length < 2) {
+    throw new HttpsError("unavailable", "Roads API tidak mengembalikan jalur.");
+  }
+
+  const encoded = encodePath(snapped);
+  await shiftRef.update({
+    snapped_path: encoded,
+    snapped_point_count: snapped.length,
+    snapped_spacing_m: spacing,
+    snapped_at: FieldValue.serverTimestamp(),
+  });
+
+  return { path: encoded, cached: false, pointCount: snapped.length };
+});
+
+/** Keeps points at least [spacingM] apart, always keeping the first and last. */
+function thin(points: { lat: number; lng: number }[], spacingM: number) {
+  const out = [points[0]];
+  for (const p of points) {
+    const last = out[out.length - 1];
+    if (geoDistance(last.lat, last.lng, p.lat, p.lng) >= spacingM) out.push(p);
+  }
+  const final = points[points.length - 1];
+  if (out[out.length - 1] !== final) out.push(final);
+  return out;
+}
 
 /**
  * Keeps the Firebase Auth custom claim (read by every Firestore/RTDB/Storage
