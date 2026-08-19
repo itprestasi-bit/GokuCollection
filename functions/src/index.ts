@@ -325,6 +325,26 @@ export const planRoute = onCall({ secrets: [roadsApiKey] }, async (request) => {
     location: { latLng: { latitude: p.lat, longitude: p.lng } },
   });
 
+  // The Routes API needs a fixed destination and will only reorder what sits
+  // between it and the origin. Which stop is pinned there therefore constrains
+  // the whole optimisation — and it used to be whichever one the phone's greedy
+  // nearest-neighbour walk happened to leave last, which is a guess rather than
+  // a decision.
+  //
+  // The farthest stop is the better anchor. A collection round is a one-way tour
+  // rather than a loop home, so its natural end is the point deepest into the
+  // territory; pinning anything nearer forces the route to come back out and go
+  // in again. This costs one pass over the list and no extra requests, unlike
+  // trying every stop as a candidate destination, which would cost one request
+  // each.
+  const farthest = stops.reduce((far, p) =>
+    geoDistance(origin.lat, origin.lng, p.lat, p.lng) >
+    geoDistance(origin.lat, origin.lng, far.lat, far.lng)
+      ? p
+      : far
+  );
+  const intermediates = stops.filter((p) => p !== farthest);
+
   const call = async (travelMode: string) => {
     const res = await fetch("https://routes.googleapis.com/directions/v2:computeRoutes", {
       method: "POST",
@@ -337,8 +357,8 @@ export const planRoute = onCall({ secrets: [roadsApiKey] }, async (request) => {
       },
       body: JSON.stringify({
         origin: waypoint(origin),
-        destination: waypoint(stops[stops.length - 1]),
-        intermediates: stops.slice(0, -1).map(waypoint),
+        destination: waypoint(farthest),
+        intermediates: intermediates.map(waypoint),
         travelMode,
         // Without this the duration is a free-flow estimate — the time the trip
         // would take on empty roads, which in Jakarta is a number that describes
@@ -346,8 +366,8 @@ export const planRoute = onCall({ secrets: [roadsApiKey] }, async (request) => {
         // current conditions, and also changes which roads are chosen, not just
         // the arrival estimate.
         routingPreference: "TRAFFIC_AWARE",
-        // Only meaningful with intermediates; harmless otherwise.
-        optimizeWaypointOrder: stops.length > 2,
+        // Only meaningful when there is more than one stop to shuffle.
+        optimizeWaypointOrder: intermediates.length > 1,
       }),
     });
     return { ok: res.ok, status: res.status, body: (await res.json()) as any };
@@ -380,8 +400,13 @@ export const planRoute = onCall({ secrets: [roadsApiKey] }, async (request) => {
     distanceMeters: route.distanceMeters ?? 0,
     // Comes back as a string of seconds, e.g. "1245s".
     durationSeconds: Number(String(route.duration ?? "0s").replace("s", "")) || 0,
-    // Present only when reordering was requested; the caller relabels its markers.
+    // Indices into the intermediates the caller sent, in the order the server
+    // wants them visited. The destination is not in this list — it is always
+    // last — so the caller appends it after applying the order.
     order: (route.optimizedIntermediateWaypointIndex ?? []) as number[],
+    // Which of the caller's stops was pinned as the end of the round, so it can
+    // rebuild exactly the sequence the server routed instead of inferring it.
+    destinationIndex: stops.indexOf(farthest),
   };
 });
 

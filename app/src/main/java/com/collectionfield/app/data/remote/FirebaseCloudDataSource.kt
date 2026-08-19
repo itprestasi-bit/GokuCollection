@@ -28,8 +28,14 @@ data class PlannedRoute(
     val points: List<Pair<Double, Double>>,
     val distanceMeters: Double,
     val durationSeconds: Long,
-    /** Order the server put the intermediate stops in, empty if it did not reorder. */
+    /**
+     * Order the server put the *intermediate* stops in — that is, the caller's
+     * stops minus the one it pinned as the destination. Empty if it did not
+     * reorder. Indices are into that reduced list, not into the original.
+     */
     val order: List<Int>,
+    /** Index, in the caller's own list, of the stop pinned as the end of the round. */
+    val destinationIndex: Int,
 )
 
 class FirebaseCloudDataSource {
@@ -182,6 +188,7 @@ class FirebaseCloudDataSource {
             distanceMeters = (data["distanceMeters"] as? Number)?.toDouble() ?: 0.0,
             durationSeconds = (data["durationSeconds"] as? Number)?.toLong() ?: 0L,
             order = (data["order"] as? List<*>)?.mapNotNull { (it as? Number)?.toInt() }.orEmpty(),
+            destinationIndex = (data["destinationIndex"] as? Number)?.toInt() ?: -1,
         )
     }.getOrNull()
 

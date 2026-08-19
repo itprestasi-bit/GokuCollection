@@ -78,9 +78,21 @@ class DailyPlanViewModel(
                 stops = optimized.map { it.latitude to it.longitude },
             ) ?: return@launch
 
-            val reordered = if (route.order.size == optimized.size - 1) {
-                // The server orders the intermediates only; the final stop stays put.
-                route.order.mapNotNull { optimized.getOrNull(it) } + optimized.last()
+            // Rebuild the sequence the server actually routed. It pins one stop as
+            // the destination — the farthest from here, since a collection round
+            // ends deepest in the territory rather than back where it started —
+            // and returns the order for everything else. Those indices point into
+            // that reduced list, so the destination has to be lifted out first and
+            // put back on the end.
+            val destIndex = route.destinationIndex
+            val reordered = if (destIndex in optimized.indices) {
+                val middle = optimized.filterIndexed { i, _ -> i != destIndex }
+                val orderedMiddle = if (route.order.size == middle.size) {
+                    route.order.mapNotNull { middle.getOrNull(it) }
+                } else {
+                    middle
+                }
+                orderedMiddle + optimized[destIndex]
             } else {
                 optimized
             }
