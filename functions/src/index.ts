@@ -215,6 +215,63 @@ export const snapShiftTrack = onCall({ secrets: [roadsApiKey] }, async (request)
   return { path: encoded, cached: false, pointCount: snapped.length };
 });
 
+/**
+ * Snaps a short run of recent positions to the road, for the live map.
+ *
+ * Separate from [snapShiftTrack] because the economics are opposite. A finished
+ * shift is snapped once and cached forever; a live marker would be snapped again
+ * every few seconds, for every collector, all day. Naively — one call per position
+ * per collector — that is hundreds of thousands of paid requests a month, which is
+ * why the caller sends a *window* of recent points on a timer instead of a point
+ * per update, and only for collectors who are actually moving.
+ *
+ * A path is sent rather than a single point on purpose. Snapping one coordinate in
+ * isolation has no direction to work with, so between two parallel roads it picks
+ * whichever is nearer and the marker hops between them — the exact jumping this is
+ * meant to remove. A run of points carries the direction of travel, so the match
+ * stays on the road being driven.
+ */
+export const snapPath = onCall({ secrets: [roadsApiKey] }, async (request) => {
+  const role = request.auth?.token.role;
+  if (!request.auth || !["admin", "supervisor", "management"].includes(String(role))) {
+    throw new HttpsError("permission-denied", "Hanya staff yang boleh memakai snap-to-road.");
+  }
+
+  const points = ((request.data as { points?: { lat: number; lng: number }[] })?.points ?? [])
+    .filter((p) => Number.isFinite(p?.lat) && Number.isFinite(p?.lng))
+    .slice(-ROADS_BATCH);
+  if (points.length < 2) {
+    throw new HttpsError("invalid-argument", "Minimal dua titik diperlukan untuk menempel ke jalan.");
+  }
+
+  const path = points.map((p) => `${p.lat},${p.lng}`).join("|");
+  const res = await fetch(
+    `https://roads.googleapis.com/v1/snapToRoads?interpolate=false` +
+      `&path=${encodeURIComponent(path)}&key=${roadsApiKey.value()}`,
+  );
+  const body = (await res.json()) as {
+    snappedPoints?: { location: { latitude: number; longitude: number } }[];
+    error?: { message?: string };
+  };
+  if (!res.ok || body.error) {
+    const detail = body.error?.message ?? `HTTP ${res.status}`;
+    logger.error("snapPath failed", detail);
+    throw new HttpsError("unavailable", `Roads API menolak permintaan: ${detail}`);
+  }
+
+  const snapped = (body.snappedPoints ?? []).map((p) => ({
+    lat: p.location.latitude,
+    lng: p.location.longitude,
+  }));
+  if (snapped.length === 0) {
+    // Off-road, or a road Google does not know. The caller keeps the raw position
+    // rather than showing nothing — a marker slightly beside the road beats a
+    // marker that vanishes.
+    return { points: [] };
+  }
+  return { points: snapped };
+});
+
 /** Keeps points at least [spacingM] apart, always keeping the first and last. */
 function thin(points: { lat: number; lng: number }[], spacingM: number) {
   const out = [points[0]];
