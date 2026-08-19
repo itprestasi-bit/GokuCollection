@@ -324,14 +324,16 @@ class LocationTrackingService : Service() {
         // smoothing, and speed EMA all happen here — a null result means the raw fix
         // was too poor or physically implausible to trust, so it's dropped entirely
         // (nothing recorded, nothing pushed to the live map) rather than passed through.
-        // Stationary means "hasn't gone anywhere", not "reports a low speed".
-        // The speed field is derived from the same noisy positions it is meant to
-        // describe, so in a built-up street a parked phone can read several m/s
-        // and never reach STOPPED — leaving the jitter suppression switched off
-        // precisely when it is needed. Displacement is immune to that, so either
-        // signal is enough to call it parked.
+        // Parked requires both signals to agree: the speed field says stopped *and*
+        // the phone has not displaced. Either-one was too eager — a fix whose speed
+        // momentarily dipped, or a walk slow enough that a 60 s window's two half
+        // centroids sat within 12 m of each other, was enough to declare a moving
+        // collector parked and freeze their marker. Both signals being wrong at the
+        // same time is far rarer than one of them being wrong, and the cost of the
+        // remaining error is a little marker noise rather than a collector who
+        // appears not to be working.
         val parked = stationaryDetector.accept(location.latitude, location.longitude, location.time)
-        val isStationary = mode == TrackingMode.STOPPED || parked
+        val isStationary = mode == TrackingMode.STOPPED && parked
 
         val refined = refiner.refine(location, isStationary = isStationary) ?: return
         val lowConfidence = refined.accuracyM > 50f
@@ -358,7 +360,7 @@ class LocationTrackingService : Service() {
         // customer from burning data and battery on identical points.
         compass.updateLocation(point.lat, point.lng, timeMs = point.capturedAt)
 
-        val decision = gate.evaluate(point.lat, point.lng, point.capturedAt, held = refined.held)
+        val decision = gate.evaluate(point.lat, point.lng, point.capturedAt, held = refined.held, speedMps = refined.speedMps)
 
         serviceScope.launch {
             // Geofence and the local shift record run on *every* accepted fix, not

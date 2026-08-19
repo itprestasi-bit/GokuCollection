@@ -53,7 +53,13 @@ class TelemetryGate {
      * @param held true when the refiner repeated the previous position because this
      *   fix was inside the noise radius — the phone has not demonstrably moved.
      */
-    fun evaluate(lat: Double, lng: Double, nowMs: Long, held: Boolean = false): Decision {
+    fun evaluate(
+        lat: Double,
+        lng: Double,
+        nowMs: Long,
+        held: Boolean = false,
+        speedMps: Float = 0f,
+    ): Decision {
         val prevLat = lastSentLat
         val prevLng = lastSentLng
 
@@ -68,10 +74,15 @@ class TelemetryGate {
         val sinceSendMs = nowMs - lastSentAtMs
         val sinceTrailMs = nowMs - lastTrailAtMs
 
-        // Genuine movement: the fix cleared the noise radius and the position on the
-        // dashboard is out of date. The floor keeps a burst of fixes from turning
-        // into a burst of writes without capping the cadence the app asks for.
-        if (!held && movedM > 0.0 && sinceSendMs >= MIN_SEND_INTERVAL_MS) {
+        // Two independent reasons to believe there is something new to send: the
+        // Doppler speed says the phone is travelling, or the position has shifted
+        // further than a single fix's noise could account for. Speed alone is
+        // enough because it answers in one fix, which is what a collector setting
+        // off needs; displacement alone is enough because a slow walk never lifts
+        // the speed field clear of its own noise. Requiring both would reproduce
+        // the original fault, where a walking collector read as parked.
+        val worthSending = speedMps >= MOVING_SPEED_MPS || movedM >= MIN_SIGNIFICANT_M
+        if (!held && worthSending && sinceSendMs >= MIN_SEND_INTERVAL_MS) {
             // Real movement. The live feed takes every one of these; the trail is
             // still time-throttled, because a vehicle at speed clears 10 m every
             // couple of seconds and the trail only needs enough points to draw a
@@ -111,7 +122,12 @@ class TelemetryGate {
          * marker is refreshed as often as the phone has something new to say and
          * no more often than that.
          */
-        private const val MIN_SEND_INTERVAL_MS = 3_000L
+        private const val MIN_SEND_INTERVAL_MS = 2_000L
+
+        /** Doppler speed that counts as travelling. Matches LocationRefiner's override. */
+        private const val MOVING_SPEED_MPS = 1.0f
+        /** Displacement beyond one fix's plausible noise, for movement too slow to register as speed. */
+        private const val MIN_SIGNIFICANT_M = 8.0
 
         private const val HEARTBEAT_BASE_MS = 30_000L
         private const val HEARTBEAT_MAX_MS = 300_000L

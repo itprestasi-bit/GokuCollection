@@ -131,12 +131,26 @@ class LocationRefiner {
             // random-walked instead of holding. Measured: 5.07 m of drift at 10 m
             // noise. Widening to ~95% confidence closes it.
             //
-            // The radius narrows when the phone is not believed to be parked, so a
-            // collector who really is walking is not pinned in place.
-            val scale = if (isStationary) ACCURACY_CONFIDENCE_SCALE else MOVING_CONFIDENCE_SCALE
-            val jitterRadiusM = (accuracyM * scale).coerceAtLeast(MIN_JITTER_RADIUS_M)
+            // Only a phone believed to be parked is ever held. An earlier version
+            // held on every fix with a narrower radius, to protect the marker when
+            // the stationary detector was wrong. It protected it too well: at a
+            // 3 s interval a walker covers 4.2 m per fix while the radius is 8-20 m,
+            // so the anchor did not move for four fixes and the reported speed was
+            // pinned to zero the whole time — a collector walking down a street
+            // showed on the dashboard as standing still. Noise on a moving phone is
+            // a smaller problem than a moving phone that reads as parked.
+            val jitterRadiusM = (accuracyM * ACCURACY_CONFIDENCE_SCALE).coerceAtLeast(MIN_JITTER_RADIUS_M)
 
-            if (jitterM < jitterRadiusM) {
+            // GPS derives speed from Doppler shift, not from the positions it is
+            // being asked to smooth, so it answers "is this thing moving" in a
+            // single fix where displacement needs several. A phone that reports
+            // real speed is never held, whatever the slower classifiers think:
+            // waiting for them is what left a collector reading as parked while
+            // they walked.
+            val movingNow = rawSpeedMps >= MOVING_SPEED_OVERRIDE_MPS
+            if (!isStationary || movingNow) {
+                consecutiveEscapes = 0
+            } else if (jitterM < jitterRadiusM) {
                 effectiveLat = prevLat
                 effectiveLng = prevLng
                 held = true
@@ -164,10 +178,17 @@ class LocationRefiner {
         // 4. Speed refinement — EMA over raw GPS speed; zeroed while holding position
         // so a stationary collector doesn't show phantom drift speed. Computed
         // before the smoothing step because the filter below is tuned by it.
+        // Asymmetric: quick to rise, slow to fall. A symmetric average starting from
+        // a parked phone's near-zero reading needed three fixes to climb past
+        // walking pace, so a collector setting off still read as stationary six
+        // seconds later. Speeding up is news and is reported almost immediately;
+        // slowing down is smoothed, because a single low sample is usually noise
+        // rather than a stop.
+        val alpha = if (rawSpeedMps > smoothedSpeedMps) SPEED_EMA_ATTACK else SPEED_EMA_ALPHA
         smoothedSpeedMps = if (lastAcceptedAtMs == 0L) {
             rawSpeedMps
         } else {
-            SPEED_EMA_ALPHA * rawSpeedMps + (1 - SPEED_EMA_ALPHA) * smoothedSpeedMps
+            alpha * rawSpeedMps + (1 - alpha) * smoothedSpeedMps
         }
         if (held) smoothedSpeedMps = 0f
 
@@ -252,10 +273,15 @@ class LocationRefiner {
         private const val MIN_JITTER_RADIUS_M = 8f
         /** 68% -> ~95% confidence. See the jitter-radius comment above. */
         private const val ACCURACY_CONFIDENCE_SCALE = 1.6f
-        /** Narrower while moving, so genuine slow travel is not mistaken for noise. */
-        private const val MOVING_CONFIDENCE_SCALE = 1.0f
         /** Consecutive fixes outside the radius before the anchor is allowed to move. */
         private const val REQUIRED_ESCAPES = 2
+        /**
+         * Doppler speed above which the phone is treated as moving no matter what.
+         * A parked phone's speed field wanders up to about 1.5 m/s on noise, so this
+         * sits above a slow walk and below that ceiling — deliberately biased toward
+         * releasing the marker rather than holding it.
+         */
+        private const val MOVING_SPEED_OVERRIDE_MPS = 1.0f
         /**
          * Floor for a standing or slow phone. Measured: dropping this to 2.0 cost
          * a walker 3 m of extra lag for no visible gain in steadiness, since the
@@ -265,6 +291,8 @@ class LocationRefiner {
         /** Headroom above the measured speed for turns and acceleration between fixes. */
         private const val PROCESS_NOISE_SPEED_SCALE = 1.5
         private const val SPEED_EMA_ALPHA = 0.35f
+        /** Weight given to a *rising* reading. See the note at the call site. */
+        private const val SPEED_EMA_ATTACK = 0.75f
     }
 }
 

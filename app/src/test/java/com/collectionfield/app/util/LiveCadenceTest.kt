@@ -59,7 +59,7 @@ class LiveCadenceTest {
                 isStationary = parked,
             ) ?: return@repeat
 
-            if (gate.evaluate(r.lat, r.lng, t, held = r.held).sendLive) {
+            if (gate.evaluate(r.lat, r.lng, t, held = r.held, speedMps = r.speedMps).sendLive) {
                 sendTimes += t
                 if (lastLat != 0.0) walk += GeoMath.distanceMeters(lastLat, lastLng, r.lat, r.lng)
                 lastLat = r.lat
@@ -81,7 +81,7 @@ class LiveCadenceTest {
         println("  skenario                  | kiriman/menit | jeda tengah | marker berjalan")
         println("-".repeat(76))
         fun row(label: String, speed: Double, noise: Double, acc: Float) {
-            val f = run(speed, noise, acc, 3_000L, 20, 7)
+            val f = run(speed, noise, acc, 2_000L, 20, 7)
             println("  %-25s | %11.1f/m | %8.1f s | %11.1f m".format(label, f.sendsPerMinute, f.medianGapS, f.markerWalkM))
         }
         row("jalan kaki 1,4 m/s", 1.4, 3.0, 10f)
@@ -93,16 +93,16 @@ class LiveCadenceTest {
     }
 
     @Test
-    fun `a moving collector refreshes every three seconds`() {
+    fun `a moving collector refreshes every two seconds`() {
         for ((speed, noise, acc) in listOf(
             Triple(1.4, 3.0, 10f),
             Triple(8.0, 4.0, 12f),
             Triple(15.0, 4.0, 12f),
         )) {
-            val f = run(speed, noise, acc, 3_000L, 20, 3)
+            val f = run(speed, noise, acc, 2_000L, 20, 3)
             assertTrue(
-                "pada %.1f m/s jeda tengahnya %.1f s, bukan 3 s".format(speed, f.medianGapS),
-                f.medianGapS <= 3.5,
+                "pada %.1f m/s jeda tengahnya %.1f s, bukan 2 s".format(speed, f.medianGapS),
+                f.medianGapS <= 2.5,
             )
         }
     }
@@ -111,8 +111,12 @@ class LiveCadenceTest {
     fun `a parked phone stays quiet and the marker stays put`() {
         // Heartbeat backs off to one every five minutes, so a 20-minute stop should
         // cost a handful of writes and move the marker essentially not at all.
-        val f = run(0.0, 20.0, 25f, 3_000L, 20, 5)
+        val f = run(0.0, 20.0, 25f, 2_000L, 20, 5)
         assertTrue("HP diam mengirim %.1f kali per menit".format(f.sendsPerMinute), f.sendsPerMinute < 1.0)
-        assertTrue("marker berjalan %.1f m padahal diam".format(f.markerWalkM), f.markerWalkM < 15.0)
+        // Deliberately looser than it was. Holding a parked marker perfectly still
+        // meant holding a walking one still too, and a collector who reads as parked
+        // while working is a worse failure than a marker that shuffles a few metres
+        // beside a tall building. See MovementLatencyTest for the other side.
+        assertTrue("marker berjalan %.1f m padahal diam".format(f.markerWalkM), f.markerWalkM < 40.0)
     }
 }

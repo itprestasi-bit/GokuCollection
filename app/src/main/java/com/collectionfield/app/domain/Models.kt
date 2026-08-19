@@ -39,7 +39,7 @@ data class TrackingPolicy(
     val minDistanceM: Float,
 ) {
     companion object {
-        // 3 s in motion, and no OS-level distance filter in either moving mode.
+        // 2 s in motion, and no OS-level distance filter in either moving mode.
         // The filter is what made the interval a fiction at low speed: a collector
         // walking at 1.4 m/s needs 7 s to cover 10 m, so the OS simply withheld the
         // fixes in between and the marker updated on distance, not on time. What
@@ -47,10 +47,14 @@ data class TrackingPolicy(
         // jitter hold refuses to move the marker on noise, and TelemetryGate
         // decides what is worth transmitting — and neither needs the OS to
         // withhold fixes to do its job.
-        val Moving = TrackingPolicy(3_000L, 3_000L, 0f)
-        val Slow = TrackingPolicy(3_000L, 3_000L, 0f)
-        // Parked: ask rarely and cheaply. Suppressing the repeat updates is
-        // handled by TelemetryGate, which is what actually decides to transmit.
-        val Stopped = TrackingPolicy(30_000L, 20_000L, 10f)
+        val Moving = TrackingPolicy(2_000L, 2_000L, 0f)
+        val Slow = TrackingPolicy(2_000L, 2_000L, 0f)
+        // Parked samples at the same rate. It used to ask every 30 s with a 10 m
+        // filter, which read as thrifty and behaved as broken: a collector who set
+        // off was not sampled again for up to half a minute, so the dashboard
+        // showed them standing still long after they had gone. Sampling is not what
+        // costs quota — transmitting is, and TelemetryGate still suppresses that to
+        // a heartbeat while parked. The price paid here is battery, deliberately.
+        val Stopped = TrackingPolicy(2_000L, 2_000L, 0f)
     }
 }

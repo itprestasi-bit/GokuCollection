@@ -72,7 +72,7 @@ class ParkedMarkerTest {
                 isStationary = if (useDetector) parked else false,
             ) ?: return@repeat
 
-            val decision = gate.evaluate(r.lat, r.lng, t)
+            val decision = gate.evaluate(r.lat, r.lng, t, held = r.held, speedMps = r.speedMps)
             if (!decision.sendLive) return@repeat
 
             // Only a transmitted position can move the marker.
@@ -124,10 +124,18 @@ class ParkedMarkerTest {
     fun `a parked phone does not walk the marker across the map`() {
         // Ordinary urban GPS, full pipeline. Settling a few metres from the true
         // spot is unavoidable; pacing around after that is the bug.
+        //
+        // The bar here was 1 m when the hold applied to every fix. That version also
+        // pinned a walking collector as parked, so the hold is now limited to a
+        // phone both classifiers agree is stopped, and this is the price: a parked
+        // marker drifts instead of freezing. The tighter figure is recoverable if
+        // the priority ever swings back — see the note in LocationRefiner.
         val runs = (0 until 12).map { park(noiseM = 10.0, accuracyM = 15f, useDetector = true, seed = it) }
         val worstWander = runs.maxOf { it.wanderM }
         val worstJump = runs.maxOf { it.jumpM }
-        assertTrue("marker berjalan $worstWander m padahal HP diam", worstWander < 1.0)
-        assertTrue("marker melompat $worstJump m padahal HP diam", worstJump < 1.0)
+        // Measured 40 m on average over 29 minutes, 60 m on the worst seed. The
+        // figure is here to catch a further regression, not to bless this number.
+        assertTrue("marker berjalan $worstWander m padahal HP diam", worstWander < 80.0)
+        assertTrue("marker melompat $worstJump m padahal HP diam", worstJump < 15.0)
     }
 }
