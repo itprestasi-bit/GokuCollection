@@ -45,6 +45,23 @@ class VisitActionViewModel(
 
         viewModelScope.launch {
             try {
+                // Refuse a second submission for a visit that already has a result.
+                //
+                // The isLoading flag above only covers a double tap while the first
+                // upload is in flight, and the screen only hides the button once the
+                // result is recorded — both are UI-level, and neither survives a
+                // path that reaches this function another way. Asking the record
+                // itself is the guard that cannot be routed around: a resubmission
+                // would upload a second photo, overwrite the first result, and give
+                // the outlet two payment records for one visit.
+                val existing = container.visitRepository.getById(visitId)
+                if (existing?.result != null) {
+                    _state.update {
+                        it.copy(isLoading = false, success = true, error = null)
+                    }
+                    return@launch
+                }
+
                 val compressedFile = ImageCompressor.compressBitmap(context, photo)
 
                 val photoUrl = container.storageService.uploadVisitPhoto(collectorUid, visitId, compressedFile)
