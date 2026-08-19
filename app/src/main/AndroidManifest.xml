@@ -8,6 +8,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- A foreground service is not kept awake by being foreground: with the screen
+         off the CPU still suspends, and location callbacks are deferred to Doze
+         maintenance windows. That is what left an 82-minute shift with one GPS
+         point. The service holds a partial wake lock only while a shift is open. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Asks the system for a battery-optimisation exemption. Required on the
+         mid-range handsets used in the field, where the optimiser suspends
+         background work aggressively regardless of foreground-service status. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
 

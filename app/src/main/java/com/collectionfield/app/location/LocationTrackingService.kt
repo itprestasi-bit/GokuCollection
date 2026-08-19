@@ -14,6 +14,7 @@ import android.location.Location
 import android.os.Build
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
@@ -25,6 +26,7 @@ import com.collectionfield.app.data.local.TelemetryPointEntity
 import com.collectionfield.app.domain.SyncStatus
 import com.collectionfield.app.domain.TrackingMode
 import com.collectionfield.app.domain.TrackingPolicy
+import com.collectionfield.app.util.BatteryOptimization
 import com.collectionfield.app.util.CompassProvider
 import com.collectionfield.app.util.DeviceState
 import com.collectionfield.app.util.HeadingFilter
@@ -118,6 +120,17 @@ class LocationTrackingService : Service() {
     private var planWatcher: Job? = null
     private var assignedOutletCount = 0
 
+    /**
+     * Held for the duration of a shift, and only then.
+     *
+     * Running in the foreground stops Android killing the service; it does not
+     * stop the CPU suspending once the screen goes off, and a suspended CPU
+     * cannot deliver location callbacks. They pile up until the next Doze
+     * maintenance window instead — which is why a real 82-minute shift recorded
+     * a single GPS point, and the replay screen had nothing to play.
+     */
+    private var wakeLock: PowerManager.WakeLock? = null
+
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             result.locations.forEach(::handleLocation)
@@ -150,6 +163,7 @@ class LocationTrackingService : Service() {
     override fun onDestroy() {
         fusedClient.removeLocationUpdates(locationCallback)
         compass.stop()
+        releaseWakeLock()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -183,9 +197,20 @@ class LocationTrackingService : Service() {
             buildNotification("Tracking aktif • menunggu GPS"),
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0,
         )
+        acquireWakeLock()
         applyTrackingMode(TrackingMode.MOVING, force = true)
         startPlanWatcher(collectorUid)
         compass.start()
+
+        if (!BatteryOptimization.isExempt(this)) {
+            // Not fatal — tracking still runs, just unreliably once the screen is
+            // off. Worth a log line so a thin trail can be explained afterwards
+            // instead of being mistaken for a bug in the filter.
+            android.util.Log.w(
+                "LocationTracking",
+                "Optimasi baterai masih aktif untuk aplikasi ini — jejak GPS bisa terputus saat layar mati.",
+            )
+        }
 
         // Immediate optimistic status so the collector shows as "moving" on the
         // admin map right away, instead of waiting for the first GPS fix (or
@@ -225,9 +250,45 @@ class LocationTrackingService : Service() {
         }
     }
 
+    private fun acquireWakeLock() {
+        if (wakeLock?.isHeld == true) return
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply {
+            setReferenceCounted(false)
+            // A timeout is a safety net, not the mechanism: stopTracking() and
+            // onDestroy() both release. If either is ever missed, this caps the
+            // damage at one long day rather than draining the phone until reboot.
+            acquire(WAKE_LOCK_TIMEOUT_MS)
+        }
+    }
+
+    private fun releaseWakeLock() {
+        runCatching { wakeLock?.takeIf { it.isHeld }?.release() }
+        wakeLock = null
+    }
+
+    /**
+     * Swiping the app off the recents list kills the process on most OEM builds,
+     * and it does so silently — the collector sees nothing, the shift stays open
+     * in Firestore, and the trail simply stops. Bring the service back if a shift
+     * is still stored; [restoreTrackingIfPossible] picks it up from there.
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (statePrefs.getString(EXTRA_SHIFT_ID, null) != null) {
+            runCatching {
+                ContextCompat.startForegroundService(
+                    applicationContext,
+                    Intent(applicationContext, LocationTrackingService::class.java),
+                )
+            }
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     private fun stopTracking() {
         fusedClient.removeLocationUpdates(locationCallback)
         compass.stop()
+        releaseWakeLock()
         stationaryDetector.reset()
         lastPushedHeading = null
         planWatcher?.cancel()
@@ -452,6 +513,12 @@ class LocationTrackingService : Service() {
         private const val EXTRA_COLLECTOR_UID = "collector_uid"
         private const val CHANNEL_ID = "shift_tracking"
         private const val NOTIFICATION_ID = 1001
+
+        private const val WAKE_LOCK_TAG = "CollectionField::ShiftTracking"
+        // Longer than any plausible shift, so the timeout never cuts a working day
+        // short — it exists only so a release that never happens cannot drain the
+        // phone until the next reboot.
+        private const val WAKE_LOCK_TIMEOUT_MS = 16 * 60 * 60 * 1000L
 
 
         // How often to re-read today's assignment so mid-shift plan edits take effect.

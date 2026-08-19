@@ -55,6 +55,7 @@ import com.collectionfield.app.domain.VisitOutlet
 import com.collectionfield.app.location.LocationTrackingService
 import com.collectionfield.app.ui.components.OutletDetailDialog
 import com.collectionfield.app.ui.components.StatusBadge
+import com.collectionfield.app.util.BatteryOptimization
 import com.collectionfield.app.util.LocationPermissions
 import kotlinx.coroutines.delay
 import java.text.NumberFormat
@@ -82,6 +83,21 @@ fun HomeScreen(
     var showVisitResultDialog by remember { mutableStateOf(false) }
     var showEndShiftConfirm by remember { mutableStateOf(false) }
     var showLocationPermissionDenied by remember { mutableStateOf(false) }
+    var showBatteryDialog by remember { mutableStateOf(false) }
+
+    // Result ignored on purpose: the system dialog reports "dismissed" either way,
+    // and the only reliable answer is to re-read the exemption when it matters.
+    val batteryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {}
+
+    // Every path into a shift goes through here, so the battery check cannot be
+    // forgotten on one of them. Tracking starts either way — the exemption makes
+    // it survive a dark screen, it is not a precondition for starting.
+    fun beginShift() {
+        startShift(context, viewModel)
+        if (!BatteryOptimization.isExempt(context)) showBatteryDialog = true
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -89,7 +105,7 @@ fun HomeScreen(
         if (pendingPermissionStart) {
             pendingPermissionStart = false
             if (LocationPermissions.hasForegroundLocation(context)) {
-                startShift(context, viewModel)
+                beginShift()
             } else {
                 showLocationPermissionDenied = true
             }
@@ -169,7 +185,7 @@ fun HomeScreen(
                 shift = state.activeShift,
                 onStart = {
                     if (LocationPermissions.hasForegroundLocation(context)) {
-                        startShift(context, viewModel)
+                        beginShift()
                     } else {
                         pendingPermissionStart = true
                         permissionLauncher.launch(LocationPermissions.requestablePermissions())
@@ -391,6 +407,42 @@ fun HomeScreen(
             dismissButton = {
                 TextButton(onClick = { showEndShiftConfirm = false }) {
                     Text("Batal")
+                }
+            },
+        )
+    }
+
+    if (showBatteryDialog) {
+        AlertDialog(
+            onDismissRequest = { showBatteryDialog = false },
+            icon = { Icon(Icons.Default.BatteryAlert, contentDescription = null) },
+            title = { Text("Izinkan Aplikasi Berjalan Terus") },
+            text = {
+                // Concrete about the consequence rather than "for better
+                // performance": the collector is the one who gets asked why their
+                // route looks empty, so they should know what this setting buys.
+                Text(
+                    "Android menghentikan aplikasi saat layar mati, sehingga jejak perjalanan Anda " +
+                        "bisa terputus dan kunjungan tidak tercatat otomatis.\n\n" +
+                        "Pada layar berikutnya, pilih aplikasi ini lalu ketuk \"Izinkan\" atau " +
+                        "\"Jangan optimalkan\". Cukup sekali, tidak perlu diulang setiap hari."
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showBatteryDialog = false
+                        val intent = BatteryOptimization.requestIntent(context)
+                            ?: BatteryOptimization.settingsIntent()
+                        runCatching { batteryLauncher.launch(intent) }
+                    },
+                ) {
+                    Text("Buka Pengaturan")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatteryDialog = false }) {
+                    Text("Nanti Saja")
                 }
             },
         )
