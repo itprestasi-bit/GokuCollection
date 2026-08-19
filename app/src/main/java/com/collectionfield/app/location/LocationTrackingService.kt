@@ -358,7 +358,7 @@ class LocationTrackingService : Service() {
         // customer from burning data and battery on identical points.
         compass.updateLocation(point.lat, point.lng, timeMs = point.capturedAt)
 
-        val decision = gate.evaluate(point.lat, point.lng, point.capturedAt)
+        val decision = gate.evaluate(point.lat, point.lng, point.capturedAt, held = refined.held)
 
         serviceScope.launch {
             // Geofence and the local shift record run on *every* accepted fix, not

@@ -39,10 +39,16 @@ data class TrackingPolicy(
     val minDistanceM: Float,
 ) {
     companion object {
-        // 5 s while moving keeps the dashboard marker fluid; 10 m is the movement
-        // threshold, applied here at the OS level as well as before upload.
-        val Moving = TrackingPolicy(5_000L, 5_000L, 10f)
-        val Slow = TrackingPolicy(10_000L, 8_000L, 10f)
+        // 3 s in motion, and no OS-level distance filter in either moving mode.
+        // The filter is what made the interval a fiction at low speed: a collector
+        // walking at 1.4 m/s needs 7 s to cover 10 m, so the OS simply withheld the
+        // fixes in between and the marker updated on distance, not on time. What
+        // actually protects battery and data is further down the pipeline — the
+        // jitter hold refuses to move the marker on noise, and TelemetryGate
+        // decides what is worth transmitting — and neither needs the OS to
+        // withhold fixes to do its job.
+        val Moving = TrackingPolicy(3_000L, 3_000L, 0f)
+        val Slow = TrackingPolicy(3_000L, 3_000L, 0f)
         // Parked: ask rarely and cheaply. Suppressing the repeat updates is
         // handled by TelemetryGate, which is what actually decides to transmit.
         val Stopped = TrackingPolicy(30_000L, 20_000L, 10f)

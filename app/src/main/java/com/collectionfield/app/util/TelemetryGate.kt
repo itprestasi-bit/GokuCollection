@@ -15,9 +15,14 @@ package com.collectionfield.app.util
  *    to stay sparse. A collector parked at a customer for twenty minutes used to
  *    write ~80 documents describing the same parked spot.
  *
- * Movement gate: nothing is sent unless the collector has actually moved
- * [MIN_DISTANCE_M], or a heartbeat is due so the dashboard can tell the phone is
- * still alive rather than dead.
+ * Movement gate: nothing is sent unless the fix carried new information, or a
+ * heartbeat is due so the dashboard can tell the phone is still alive rather than
+ * dead. "New information" is decided upstream, by the refiner's jitter hold: a fix
+ * inside the noise radius is returned as a repeat of the previous position, and a
+ * repeat is never worth transmitting. Re-deriving that here from a distance
+ * threshold was what capped the live feed at walking pace — 1.4 m/s takes seven
+ * seconds to clear 10 m, so a walking collector's marker updated every 7 s no
+ * matter what interval the GPS was asked for.
  *
  * Heartbeat back-off: a stationary phone starts at [HEARTBEAT_BASE_MS] and then
  * doubles up to [HEARTBEAT_MAX_MS]. A fixed 30-second heartbeat would still be
@@ -44,7 +49,11 @@ class TelemetryGate {
     private var lastTrailAtMs = 0L
     private var heartbeatIntervalMs = HEARTBEAT_BASE_MS
 
-    fun evaluate(lat: Double, lng: Double, nowMs: Long): Decision {
+    /**
+     * @param held true when the refiner repeated the previous position because this
+     *   fix was inside the noise radius — the phone has not demonstrably moved.
+     */
+    fun evaluate(lat: Double, lng: Double, nowMs: Long, held: Boolean = false): Decision {
         val prevLat = lastSentLat
         val prevLng = lastSentLng
 
@@ -59,7 +68,10 @@ class TelemetryGate {
         val sinceSendMs = nowMs - lastSentAtMs
         val sinceTrailMs = nowMs - lastTrailAtMs
 
-        if (movedM >= MIN_DISTANCE_M) {
+        // Genuine movement: the fix cleared the noise radius and the position on the
+        // dashboard is out of date. The floor keeps a burst of fixes from turning
+        // into a burst of writes without capping the cadence the app asks for.
+        if (!held && movedM > 0.0 && sinceSendMs >= MIN_SEND_INTERVAL_MS) {
             // Real movement. The live feed takes every one of these; the trail is
             // still time-throttled, because a vehicle at speed clears 10 m every
             // couple of seconds and the trail only needs enough points to draw a
@@ -94,8 +106,12 @@ class TelemetryGate {
     val heartbeatSeconds: Int get() = (heartbeatIntervalMs / 1000).toInt()
 
     companion object {
-        /** Movement below this is treated as staying put (matches the GPS request's own filter). */
-        const val MIN_DISTANCE_M = 10.0
+        /**
+         * Floor between live pushes while moving. Matches the GPS interval, so the
+         * marker is refreshed as often as the phone has something new to say and
+         * no more often than that.
+         */
+        private const val MIN_SEND_INTERVAL_MS = 3_000L
 
         private const val HEARTBEAT_BASE_MS = 30_000L
         private const val HEARTBEAT_MAX_MS = 300_000L

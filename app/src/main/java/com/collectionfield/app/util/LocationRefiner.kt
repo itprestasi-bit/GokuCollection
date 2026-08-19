@@ -92,6 +92,7 @@ class LocationRefiner {
                     speedMps = 0f,
                     bearing = bearing,
                     capturedAtMs = now,
+                    held = true,
                 )
             }
             if (!starved) return null
@@ -205,6 +206,7 @@ class LocationRefiner {
             speedMps = smoothedSpeedMps,
             bearing = bearing,
             capturedAtMs = now,
+            held = held,
         )
     }
 
@@ -273,4 +275,11 @@ data class RefinedLocation(
     val speedMps: Float,
     val bearing: Float?,
     val capturedAtMs: Long,
+    /**
+     * True when this fix was inside the noise radius and the previous position was
+     * repeated instead. The coordinates are then identical to the last ones, so
+     * there is nothing new to transmit — [TelemetryGate] uses this rather than
+     * re-deriving "did it move" from the coordinates it was handed.
+     */
+    val held: Boolean = false,
 )
