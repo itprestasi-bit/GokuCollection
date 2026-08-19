@@ -115,7 +115,7 @@ class LocationRefinerTest {
     }
 
     @Test
-    fun `hold releases once the phone leaves the noise radius`() {
+    fun `a lone stray fix does not move the marker, but a real departure does`() {
         val refiner = LocationRefiner()
         var t = 1_000_000L
         val first = feed(refiner, baseLat, baseLng, t, accuracyM = 12f)!!
@@ -125,8 +125,17 @@ class LocationRefinerTest {
         val held = feed(refiner, baseLat + metresToLat(9.0), baseLng, t, accuracyM = 12f)!!
         assertTrue(GeoMath.distanceMeters(first.lat, first.lng, held.lat, held.lng) < 2.0)
 
-        // Well outside it -> must move, even though the flag still says stationary.
-        // Otherwise a collector who walks off would stay pinned to the old spot.
+        // A single fix well outside the radius is an outlier, not a journey. Acting
+        // on each of these is what walked a parked marker 200 m across the map.
+        t += 5_000
+        val stray = feed(refiner, baseLat + metresToLat(60.0), baseLng, t, accuracyM = 12f)!!
+        assertTrue(
+            "satu fix nyasar langsung menggeser marker",
+            GeoMath.distanceMeters(first.lat, first.lng, stray.lat, stray.lng) < 2.0,
+        )
+
+        // Confirmed by a second fix in the same place -> the collector really has
+        // left, and the marker must follow. Otherwise they stay pinned for good.
         t += 5_000
         val moved = feed(refiner, baseLat + metresToLat(60.0), baseLng, t, accuracyM = 12f)!!
         val delta = GeoMath.distanceMeters(first.lat, first.lng, moved.lat, moved.lng)

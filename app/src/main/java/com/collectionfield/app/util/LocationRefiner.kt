@@ -24,6 +24,7 @@ class LocationRefiner {
     private var lastAnyAcceptAtMs = 0L
     private var lastAcceptedAccuracyM = 0f
     private var consecutiveRejects = 0
+    private var consecutiveEscapes = 0
     private var smoothedSpeedMps = 0f
 
     /** Thin adapter over the platform type; the logic lives in [refine] below. */
@@ -120,7 +121,7 @@ class LocationRefiner {
         var effectiveLat = rawLat
         var effectiveLng = rawLng
         var held = false
-        if (isStationary && prevLat != null && prevLng != null) {
+        if (prevLat != null && prevLng != null) {
             val jitterM = GeoMath.distanceMeters(prevLat, prevLng, rawLat, rawLng)
             // Android reports accuracy as a 68% confidence radius, so roughly a
             // third of genuine fixes land *outside* it. Taking that figure as the
@@ -128,12 +129,35 @@ class LocationRefiner {
             // and each one that escaped moved the anchor — so a parked phone
             // random-walked instead of holding. Measured: 5.07 m of drift at 10 m
             // noise. Widening to ~95% confidence closes it.
-            val jitterRadiusM = (accuracyM * ACCURACY_CONFIDENCE_SCALE).coerceAtLeast(MIN_JITTER_RADIUS_M)
+            //
+            // The radius narrows when the phone is not believed to be parked, so a
+            // collector who really is walking is not pinned in place.
+            val scale = if (isStationary) ACCURACY_CONFIDENCE_SCALE else MOVING_CONFIDENCE_SCALE
+            val jitterRadiusM = (accuracyM * scale).coerceAtLeast(MIN_JITTER_RADIUS_M)
+
             if (jitterM < jitterRadiusM) {
                 effectiveLat = prevLat
                 effectiveLng = prevLng
                 held = true
+                consecutiveEscapes = 0
+            } else if (consecutiveEscapes + 1 < REQUIRED_ESCAPES) {
+                // One fix beyond the noise radius is an outlier; two in a row is a
+                // departure. Without this the anchor moved on every single stray
+                // fix, and since the next hold then formed around the new spot, a
+                // parked phone paced across the map — measured at 106 m of travel
+                // in half an hour beside tall buildings, 218 m in heavy multipath,
+                // while sitting perfectly still. Requiring persistence costs one
+                // fix of latency when someone genuinely sets off.
+                consecutiveEscapes++
+                effectiveLat = prevLat
+                effectiveLng = prevLng
+                held = true
             }
+            // Past the threshold the counter is deliberately left where it is.
+            // Resetting it here would make the *next* fix a first escape again, so
+            // a moving collector alternated held, released, held — travelling at
+            // half speed and finishing 48 m behind. Only a fix that lands back
+            // inside the radius means the phone has settled, and only that resets.
         }
 
         // 4. Speed refinement — EMA over raw GPS speed; zeroed while holding position
@@ -226,6 +250,10 @@ class LocationRefiner {
         private const val MIN_JITTER_RADIUS_M = 8f
         /** 68% -> ~95% confidence. See the jitter-radius comment above. */
         private const val ACCURACY_CONFIDENCE_SCALE = 1.6f
+        /** Narrower while moving, so genuine slow travel is not mistaken for noise. */
+        private const val MOVING_CONFIDENCE_SCALE = 1.0f
+        /** Consecutive fixes outside the radius before the anchor is allowed to move. */
+        private const val REQUIRED_ESCAPES = 2
         /**
          * Floor for a standing or slow phone. Measured: dropping this to 2.0 cost
          * a walker 3 m of extra lag for no visible gain in steadiness, since the
