@@ -23,8 +23,11 @@ class FirestoreService(
         if (stops.isEmpty()) return@runCatching null
 
         // Fetch only the stops' own outlets. This used to load the entire ~7.7k-row
-        // master list into a map to look up a dozen ids.
-        val localOutlets = outletRepository.getByIds(stops.map { it.outletId }).associateBy { it.id }
+        // master list into a map to look up a dozen ids. ensureCached also pulls any
+        // outlet the throttled bulk sync has not delivered yet — without it, a stop
+        // added the same day the outlet was created was dropped on the floor here
+        // and the collector was shown an empty route.
+        val localOutlets = outletRepository.ensureCached(stops.map { it.outletId }).associateBy { it.id }
         val outlets = stops.mapIndexedNotNull { index, stop ->
             localOutlets[stop.outletId]?.let { outlet ->
                 VisitOutlet(

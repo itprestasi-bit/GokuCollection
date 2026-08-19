@@ -144,6 +144,31 @@ class OutletRepository(
     suspend fun getByIds(ids: List<String>): List<OutletEntity> =
         if (ids.isEmpty()) emptyList() else db.outletDao().getByIds(ids)
 
+    /**
+     * Returns the named outlets, pulling any the phone has never seen.
+     *
+     * Bulk outlet sync is a throttled delta, so an outlet created this morning and
+     * scheduled for today is not in the local cache yet. Callers that must resolve
+     * specific ids — the daily plan above all — use this instead of getByIds, so a
+     * freshly created outlet does not silently vanish from a collector's route.
+     * Only the genuinely missing ids go to the network.
+     */
+    suspend fun ensureCached(ids: List<String>): List<OutletEntity> {
+        if (ids.isEmpty()) return emptyList()
+        val local = getByIds(ids)
+        val missing = ids.toSet() - local.map { it.id }.toSet()
+        if (missing.isEmpty()) return local
+
+        val fetched = runCatching { cloud?.fetchOutletsByIds(missing.toList()).orEmpty() }
+            .getOrElse {
+                // Offline, or the outlet was deleted upstream. Better a partial route
+                // than none — the caller shows what it could resolve.
+                return local
+            }
+        if (fetched.isNotEmpty()) db.outletDao().upsertAll(fetched)
+        return local + fetched
+    }
+
     fun observeById(id: String?): Flow<OutletEntity?> =
         if (id == null) flowOf(null) else db.outletDao().observeById(id)
 

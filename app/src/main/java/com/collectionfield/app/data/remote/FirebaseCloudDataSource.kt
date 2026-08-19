@@ -8,6 +8,8 @@ import com.collectionfield.app.domain.AssignmentStopRef
 import com.google.firebase.Timestamp
 import com.google.firebase.database.FirebaseDatabase
 import com.google.firebase.database.ServerValue
+import com.google.firebase.firestore.DocumentSnapshot
+import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
@@ -156,26 +158,51 @@ class FirebaseCloudDataSource {
 
         val snapshot = query.get().awaitResult()
         return snapshot.documents.map { doc ->
-            @Suppress("UNCHECKED_CAST")
-            val piutangMap = doc.get("piutang") as? Map<String, Map<String, Any?>>
             val status = doc.getString("status").orEmpty()
             RemoteOutlet(
-                entity = OutletEntity(
-                    id = doc.id,
-                    code = doc.getString("code").orEmpty(),
-                    name = doc.getString("name").orEmpty(),
-                    lat = doc.getDouble("lat") ?: 0.0,
-                    lng = doc.getDouble("lng") ?: 0.0,
-                    address = doc.getString("address").orEmpty(),
-                    radiusM = (doc.getLong("radius_m") ?: 30L).toInt(),
-                    priority = (doc.getLong("priority") ?: 1L).toInt(),
-                    status = "ACTIVE",
-                    piutangJson = piutangMapToJson(piutangMap),
-                ),
+                entity = toOutletEntity(doc),
                 // `since == null` already filtered to active in the query itself.
                 isActive = since == null || status.equals("active", ignoreCase = true),
             )
         }
+    }
+
+    /**
+     * Fetches named outlets regardless of when they last changed.
+     *
+     * The bulk sync is a delta on `updated_at` behind a six-hour throttle, which is
+     * right for 7.7k rows of slow-moving master data but leaves a gap: an outlet
+     * created this morning and put on today's schedule is not on the phone yet. The
+     * daily plan then quietly drops that stop, and the collector sees an empty
+     * route with nothing to explain it. Resolving the handful of ids a schedule
+     * actually names costs a few document reads and closes that gap.
+     */
+    suspend fun fetchOutletsByIds(ids: List<String>): List<OutletEntity> {
+        if (ids.isEmpty()) return emptyList()
+        // Firestore caps an `in` filter at 30 values per query.
+        return ids.distinct().chunked(30).flatMap { chunk ->
+            firestore.collection("outlets")
+                .whereIn(FieldPath.documentId(), chunk)
+                .get().awaitResult()
+                .documents.map { toOutletEntity(it) }
+        }
+    }
+
+    private fun toOutletEntity(doc: DocumentSnapshot): OutletEntity {
+        @Suppress("UNCHECKED_CAST")
+        val piutangMap = doc.get("piutang") as? Map<String, Map<String, Any?>>
+        return OutletEntity(
+            id = doc.id,
+            code = doc.getString("code").orEmpty(),
+            name = doc.getString("name").orEmpty(),
+            lat = doc.getDouble("lat") ?: 0.0,
+            lng = doc.getDouble("lng") ?: 0.0,
+            address = doc.getString("address").orEmpty(),
+            radiusM = (doc.getLong("radius_m") ?: 30L).toInt(),
+            priority = (doc.getLong("priority") ?: 1L).toInt(),
+            status = "ACTIVE",
+            piutangJson = piutangMapToJson(piutangMap),
+        )
     }
 
     /**
