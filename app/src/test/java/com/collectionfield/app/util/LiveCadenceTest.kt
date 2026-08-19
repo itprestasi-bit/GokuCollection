@@ -108,11 +108,12 @@ class LiveCadenceTest {
     }
 
     @Test
-    fun `a parked phone stays quiet and the marker stays put`() {
-        // Heartbeat backs off to one every five minutes, so a 20-minute stop should
-        // cost a handful of writes and move the marker essentially not at all.
+    fun `a parked phone keeps reporting in, and the marker stays put`() {
+        // A parked phone now transmits as often as a moving one — that is the point,
+        // so "no update" always means the phone is in trouble rather than idle. What
+        // must not happen is the marker moving, and that is what is asserted.
         val f = run(0.0, 20.0, 25f, 2_000L, 20, 5)
-        assertTrue("HP diam mengirim %.1f kali per menit".format(f.sendsPerMinute), f.sendsPerMinute < 1.0)
+        assertTrue("HP diam berhenti melapor (%.1f/menit)".format(f.sendsPerMinute), f.sendsPerMinute > 10.0)
         // Deliberately looser than it was. Holding a parked marker perfectly still
         // meant holding a walking one still too, and a collector who reads as parked
         // while working is a worse failure than a marker that shuffles a few metres

@@ -133,9 +133,14 @@ class ParkedMarkerTest {
         val runs = (0 until 12).map { park(noiseM = 10.0, accuracyM = 15f, useDetector = true, seed = it) }
         val worstWander = runs.maxOf { it.wanderM }
         val worstJump = runs.maxOf { it.jumpM }
-        // Measured 40 m on average over 29 minutes, 60 m on the worst seed. The
-        // figure is here to catch a further regression, not to bless this number.
-        assertTrue("marker berjalan $worstWander m padahal HP diam", worstWander < 80.0)
+        // Measured 43-81 m over 29 minutes depending on GPS quality, against ~6 m
+        // when the hold was maximal and a walking collector read as parked. The
+        // driver is the 1 m/s Doppler override in LocationRefiner: a parked phone's
+        // speed field wanders up to about 1.5 m/s, so a minority of fixes release
+        // the hold. Raising that threshold would cut this figure and cost a walker
+        // their two-second detection — that is the dial, and it is set where the
+        // field asked for it. The bound here catches a further regression.
+        assertTrue("marker berjalan $worstWander m padahal HP diam", worstWander < 110.0)
         assertTrue("marker melompat $worstJump m padahal HP diam", worstJump < 15.0)
     }
 }

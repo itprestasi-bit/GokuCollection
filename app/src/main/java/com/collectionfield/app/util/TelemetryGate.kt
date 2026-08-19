@@ -24,11 +24,11 @@ package com.collectionfield.app.util
  * seconds to clear 10 m, so a walking collector's marker updated every 7 s no
  * matter what interval the GPS was asked for.
  *
- * Heartbeat back-off: a stationary phone starts at [HEARTBEAT_BASE_MS] and then
- * doubles up to [HEARTBEAT_MAX_MS]. A fixed 30-second heartbeat would still be
- * 40 transmissions across a 20-minute stop; backing off makes that 6 while the
- * "still alive" signal never goes quiet for more than a few minutes. Any real
- * movement resets it immediately.
+ * There is no heartbeat back-off any more. It existed to spare data on a parked
+ * phone, and it meant the dashboard could not tell a collector standing still from
+ * a collector whose phone had died until minutes had passed. Every fix is now
+ * pushed; a parked one repeats the same coordinates, so it costs bandwidth and
+ * nothing else.
  */
 class TelemetryGate {
 
@@ -47,7 +47,6 @@ class TelemetryGate {
     private var lastSentLng: Double? = null
     private var lastSentAtMs = 0L
     private var lastTrailAtMs = 0L
-    private var heartbeatIntervalMs = HEARTBEAT_BASE_MS
 
     /**
      * @param held true when the refiner repeated the previous position because this
@@ -66,43 +65,39 @@ class TelemetryGate {
         // First fix of the shift always goes out — the map needs a starting point.
         if (prevLat == null || prevLng == null) {
             accept(lat, lng, nowMs, trail = true)
-            heartbeatIntervalMs = HEARTBEAT_BASE_MS
             return Decision(sendLive = true, recordTrail = true, reason = Reason.MOVED)
         }
 
-        val movedM = GeoMath.distanceMeters(prevLat, prevLng, lat, lng)
         val sinceSendMs = nowMs - lastSentAtMs
         val sinceTrailMs = nowMs - lastTrailAtMs
 
-        // Two independent reasons to believe there is something new to send: the
-        // Doppler speed says the phone is travelling, or the position has shifted
-        // further than a single fix's noise could account for. Speed alone is
-        // enough because it answers in one fix, which is what a collector setting
-        // off needs; displacement alone is enough because a slow walk never lifts
-        // the speed field clear of its own noise. Requiring both would reproduce
-        // the original fault, where a walking collector read as parked.
-        val worthSending = speedMps >= MOVING_SPEED_MPS || movedM >= MIN_SIGNIFICANT_M
-        if (!held && worthSending && sinceSendMs >= MIN_SEND_INTERVAL_MS) {
+        // The live feed goes out on every fix now, parked or not; the decision here
+        // is only how to label it.
+        //
+        // Deciding *whether* to transmit was a data-cost optimisation, and it kept
+        // buying trouble: every rule for "is this worth sending" was another way to
+        // classify a working collector as idle, and a phone that had legitimately
+        // gone quiet was indistinguishable from one that had died. Suppression is
+        // not what keeps the marker still — the jitter hold is. A held fix carries
+        // the previous coordinates unchanged, so sending it refreshes "last seen"
+        // without moving anything on the map.
+        if (sinceSendMs >= MIN_SEND_INTERVAL_MS) {
+            if (held) {
+                // Same position, fresh timestamp: alive, not moving.
+                val recordTrail = sinceTrailMs >= TRAIL_STATIONARY_INTERVAL_MS
+                accept(lat, lng, nowMs, trail = recordTrail)
+                return Decision(sendLive = true, recordTrail = recordTrail, reason = Reason.HEARTBEAT)
+            }
             // Real movement. The live feed takes every one of these; the trail is
             // still time-throttled, because a vehicle at speed clears 10 m every
             // couple of seconds and the trail only needs enough points to draw a
             // recognisable route later.
             val recordTrail = sinceTrailMs >= TRAIL_MOVING_INTERVAL_MS
             accept(lat, lng, nowMs, trail = recordTrail)
-            heartbeatIntervalMs = HEARTBEAT_BASE_MS
             return Decision(sendLive = true, recordTrail = recordTrail, reason = Reason.MOVED)
         }
 
-        if (sinceSendMs >= heartbeatIntervalMs) {
-            // Stationary, but it's time to prove the phone is still on. The trail
-            // gets a point far less often than the live feed does.
-            val recordTrail = sinceTrailMs >= TRAIL_STATIONARY_INTERVAL_MS
-            accept(lat, lng, nowMs, trail = recordTrail)
-            heartbeatIntervalMs = (heartbeatIntervalMs * 2).coerceAtMost(HEARTBEAT_MAX_MS)
-            return Decision(sendLive = true, recordTrail = recordTrail, reason = Reason.HEARTBEAT)
-        }
-
-        // Standing still and the heartbeat isn't due: send nothing at all.
+        // Less than the minimum interval since the last push: nothing to add yet.
         return Decision(sendLive = false, recordTrail = false, reason = Reason.SUPPRESSED)
     }
 
@@ -113,9 +108,6 @@ class TelemetryGate {
         if (trail) lastTrailAtMs = nowMs
     }
 
-    /** Current stationary heartbeat spacing, for display. */
-    val heartbeatSeconds: Int get() = (heartbeatIntervalMs / 1000).toInt()
-
     companion object {
         /**
          * Floor between live pushes while moving. Matches the GPS interval, so the
@@ -124,18 +116,11 @@ class TelemetryGate {
          */
         private const val MIN_SEND_INTERVAL_MS = 2_000L
 
-        /** Doppler speed that counts as travelling. Matches LocationRefiner's override. */
-        private const val MOVING_SPEED_MPS = 1.0f
-        /** Displacement beyond one fix's plausible noise, for movement too slow to register as speed. */
-        private const val MIN_SIGNIFICANT_M = 8.0
 
-        private const val HEARTBEAT_BASE_MS = 30_000L
-        private const val HEARTBEAT_MAX_MS = 300_000L
-
-        // Trail cadence. At 40 km/h, 30 s is a point roughly every 330 m — ample
-        // for a route replay, and ~4.8k documents/day across four collectors on
-        // ten-hour shifts, comfortably inside the daily write allowance.
-        private const val TRAIL_MOVING_INTERVAL_MS = 30_000L
-        private const val TRAIL_STATIONARY_INTERVAL_MS = 300_000L
+        // Trail cadence. 30 s meant a point every 330 m at 40 km/h — enough to prove
+        // a route was driven, not enough to see how it was driven. 10 s draws the
+        // turns, which is what makes a replay worth opening.
+        private const val TRAIL_MOVING_INTERVAL_MS = 10_000L
+        private const val TRAIL_STATIONARY_INTERVAL_MS = 60_000L
     }
 }

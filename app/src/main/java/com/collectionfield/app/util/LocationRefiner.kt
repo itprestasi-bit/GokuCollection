@@ -139,7 +139,8 @@ class LocationRefiner {
             // pinned to zero the whole time — a collector walking down a street
             // showed on the dashboard as standing still. Noise on a moving phone is
             // a smaller problem than a moving phone that reads as parked.
-            val jitterRadiusM = (accuracyM * ACCURACY_CONFIDENCE_SCALE).coerceAtLeast(MIN_JITTER_RADIUS_M)
+            val scale = if (isStationary) ACCURACY_CONFIDENCE_SCALE else SLOW_CONFIDENCE_SCALE
+            val jitterRadiusM = (accuracyM * scale).coerceAtLeast(MIN_JITTER_RADIUS_M)
 
             // GPS derives speed from Doppler shift, not from the positions it is
             // being asked to smooth, so it answers "is this thing moving" in a
@@ -147,8 +148,15 @@ class LocationRefiner {
             // real speed is never held, whatever the slower classifiers think:
             // waiting for them is what left a collector reading as parked while
             // they walked.
+            // The hold now turns on the speed reading alone, not on what the slower
+            // classifiers have concluded. Those classifiers are why a parked phone
+            // still drifted: a phantom 0.6 m/s was enough to call it "slow" rather
+            // than stopped, the hold switched off, and the noise went straight to
+            // the map. Doppler is the honest signal in both directions — it releases
+            // in one fix when someone sets off, and it stays low when they have not.
+            // isStationary now only widens the radius once the slower signals agree.
             val movingNow = rawSpeedMps >= MOVING_SPEED_OVERRIDE_MPS
-            if (!isStationary || movingNow) {
+            if (movingNow) {
                 consecutiveEscapes = 0
             } else if (jitterM < jitterRadiusM) {
                 effectiveLat = prevLat
@@ -282,6 +290,12 @@ class LocationRefiner {
          * releasing the marker rather than holding it.
          */
         private const val MOVING_SPEED_OVERRIDE_MPS = 1.0f
+        /**
+         * Hold radius while the speed says still but the classifiers have not agreed
+         * yet. Narrower than the parked radius so genuine slow travel still escapes
+         * after a couple of fixes.
+         */
+        private const val SLOW_CONFIDENCE_SCALE = 1.0f
         /**
          * Floor for a standing or slow phone. Measured: dropping this to 2.0 cost
          * a walker 3 m of extra lag for no visible gain in steadiness, since the
