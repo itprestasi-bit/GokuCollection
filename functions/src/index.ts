@@ -340,6 +340,12 @@ export const planRoute = onCall({ secrets: [roadsApiKey] }, async (request) => {
         destination: waypoint(stops[stops.length - 1]),
         intermediates: stops.slice(0, -1).map(waypoint),
         travelMode,
+        // Without this the duration is a free-flow estimate — the time the trip
+        // would take on empty roads, which in Jakarta is a number that describes
+        // no hour of any working day. TRAFFIC_AWARE prices the route against
+        // current conditions, and also changes which roads are chosen, not just
+        // the arrival estimate.
+        routingPreference: "TRAFFIC_AWARE",
         // Only meaningful with intermediates; harmless otherwise.
         optimizeWaypointOrder: stops.length > 2,
       }),
@@ -347,8 +353,13 @@ export const planRoute = onCall({ secrets: [roadsApiKey] }, async (request) => {
     return { ok: res.ok, status: res.status, body: (await res.json()) as any };
   };
 
-  let result = await call("TWO_WHEELER");
-  if (!result.ok) result = await call("DRIVE");
+  let travelMode = "TWO_WHEELER";
+  let result = await call(travelMode);
+  if (!result.ok) {
+    logger.warn("TWO_WHEELER ditolak, jatuh ke DRIVE", JSON.stringify(result.body?.error ?? {}).slice(0, 300));
+    travelMode = "DRIVE";
+    result = await call(travelMode);
+  }
 
   if (!result.ok || result.body?.error) {
     const detail = result.body?.error?.message ?? `HTTP ${result.status}`;
@@ -362,6 +373,9 @@ export const planRoute = onCall({ secrets: [roadsApiKey] }, async (request) => {
   }
 
   return {
+    // Reported so the caller — and anyone debugging a route that looks like a car
+    // took it — can see which network was actually used rather than assume.
+    travelMode,
     polyline: route.polyline.encodedPolyline as string,
     distanceMeters: route.distanceMeters ?? 0,
     // Comes back as a string of seconds, e.g. "1245s".
