@@ -66,14 +66,21 @@ class VisitActionViewModel(
                     container.visitRepository.closeVisit(visitId, departureAt, durationSec)
                 }
 
+                // Queue the visit before touching the outlet. The outlet balance is a
+                // secondary, derivable write; the visit is the collector's actual work
+                // and is already committed locally by this point. When the outlet
+                // update failed — as it did for every collector until the rules let
+                // them record a payment at all — the exception skipped this line, so
+                // the visit sat in Room unqueued and the collector was shown an error
+                // for something that had in fact been saved.
+                container.enqueueSync()
+
                 container.cloudDataSource?.updateOutletDebt(
                     outletId = outletId,
                     tag = tag,
                     status = newStatus,
                     remainingDebt = remainingDebt,
                 )
-
-                container.enqueueSync()
 
                 _state.update { it.copy(isLoading = false, success = true) }
                 compressedFile.delete()

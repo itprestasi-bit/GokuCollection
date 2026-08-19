@@ -41,7 +41,24 @@ service cloud.firestore {
     match /outlets/{outletId} {
       allow read: if isAuth();
       allow create: if isAuth();
-      allow update, delete: if isStaff();
+      allow delete: if isStaff();
+
+      // Staff may edit an outlet freely. A collector may not — except for the one
+      // thing their job consists of: recording what was collected. Closing a visit
+      // writes status_bayar and the remaining balance back to the outlet, and with
+      // update limited to staff that write was denied, so every check-in failed
+      // with PERMISSION_DENIED at the final step.
+      //
+      // hasOnly is the guard: a collector can move the payment fields and nothing
+      // else, so the outlet's identity, coordinates, radius and active status stay
+      // out of reach from the field. Which collector may collect where is enforced
+      // by the assignment they had to be standing in to open the visit at all,
+      // rather than re-derived here at the cost of a document read per write.
+      allow update: if isStaff() || (
+        isAuth() &&
+        request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status_bayar', 'piutang', 'updated_at'])
+      );
     }
 
     match /assignments/{assignmentId} {
